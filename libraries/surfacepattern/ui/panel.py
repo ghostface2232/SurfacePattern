@@ -49,6 +49,13 @@ PARAM_DEFAULTS = {
 }
 
 
+def make_label(text):
+    """Eto Label helper — pythonnet has no Label(Text=...) constructor-property syntax."""
+    label = Eto.Forms.Label()
+    label.Text = text
+    return label
+
+
 def eto_handler(func):
     """Wrap an Eto event handler with try/except — Eto swallows handler exceptions silently.
 
@@ -228,7 +235,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
             PLACEMENT_OPTIONS, session.params.get("placement_mode", "uv"), "placement_mode"
         )
         layout.AddRow(self.pick_button, self.target_label, None)
-        layout.AddRow(Eto.Forms.Label(Text="Placement"), self.placement_dropdown, None)
+        layout.AddRow(make_label("Placement"), self.placement_dropdown, None)
 
         # (2) Pattern-mode segment: grid / halftone / stamp.
         self.mode_segment = Eto.Forms.RadioButtonList()
@@ -289,12 +296,12 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.sliders = {}
         grid = Eto.Forms.DynamicLayout()
         grid.Spacing = Eto.Drawing.Size(6, 4)
-        grid.AddRow(Eto.Forms.Label(Text="Shape"), self.shape_dropdown, None)
+        grid.AddRow(make_label("Shape"), self.shape_dropdown, None)
         grid.AddRow(*self._slider("Size", "size", 0.5, 50.0, 0.1, "mm"))
         grid.AddRow(*self._slider("Slot Ratio", "slot_ratio", 0.1, 1.0, 0.05, ""))
         grid.AddRow(*self._slider("Spacing X", "spacing_x", 1.0, 100.0, 0.5, "mm"))
         grid.AddRow(*self._slider("Spacing Y", "spacing_y", 1.0, 100.0, 0.5, "mm"))
-        grid.AddRow(Eto.Forms.Label(Text="Grid Type"), self.grid_type_dropdown, None)
+        grid.AddRow(make_label("Grid Type"), self.grid_type_dropdown, None)
         grid.AddRow(*self._slider("Jitter Pos", "jitter_position", 0.0, 100.0, 1.0, "%"))
         grid.AddRow(*self._slider("Jitter Size", "jitter_size", 0.0, 100.0, 1.0, "%"))
         grid.AddRow(*self._slider("Jitter Rot", "jitter_rotation", 0.0, 100.0, 1.0, "%"))
@@ -326,7 +333,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         halftone.AddRow(*self._slider("Radius", "halftone_radius", 1.0, 500.0, 1.0, "mm"))
         halftone.AddRow(*self._slider("Size Min", "halftone_size_min", 0.0, 50.0, 0.1, "mm"))
         halftone.AddRow(*self._slider("Size Max", "halftone_size_max", 0.0, 50.0, 0.1, "mm"))
-        halftone.AddRow(Eto.Forms.Label(Text="Profile"), self.profile_dropdown, None)
+        halftone.AddRow(make_label("Profile"), self.profile_dropdown, None)
         halftone.AddRow(self.invert_checkbox, None)
         halftone.AddRow(*self._slider("Cull Below", "halftone_cull", 0.0, 20.0, 0.1, "mm"))
         return self._expander("Halftone", halftone)
@@ -334,12 +341,12 @@ class SurfacePatternPanel(Eto.Forms.Form):
     def _placeholder_section(self, title, message):
         content = Eto.Forms.DynamicLayout()
         content.Spacing = Eto.Drawing.Size(6, 4)
-        content.AddRow(Eto.Forms.Label(Text=message))
+        content.AddRow(make_label(message))
         return self._expander(title, content)
 
     def _expander(self, title, content):
         expander = Eto.Forms.Expander()
-        expander.Header = Eto.Forms.Label(Text=title)
+        expander.Header = make_label(title)
         expander.Expanded = True
         expander.Content = content
         return expander
