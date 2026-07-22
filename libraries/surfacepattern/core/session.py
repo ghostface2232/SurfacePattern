@@ -40,6 +40,7 @@ class PatternSession:
     preview_curves: list = field(default_factory=list)        # full NURBS curves
     preview_draft_curves: list = field(default_factory=list)  # polyline approximations
     preview_quality: str = "draft"                   # "draft" | "full"
+    pullback_failures: int = 0                       # curves that fell back to planar on last full recompute
 
     def suggest_placement_mode(self):
         """Return the default placement mode for the current targets: 'uv' or 'world'."""
@@ -64,8 +65,52 @@ class PatternSession:
         scriptcontext.doc.Views.Redraw()
 
     def request_recompute(self, draft):
-        """Placeholder: engine recompute wiring lands in a later step."""
+        """Run the active pattern engine and rebuild the preview cache (draft skips pullback)."""
+        # Local imports keep module load order safe (preview.conduit imports this module).
+        from surfacepattern.core import mapping
+        from surfacepattern.engine import grid, shapes
+        from surfacepattern.preview.conduit import get_conduit
+
         self.preview_quality = "draft" if draft else "full"
+        self.prune_dead_targets()
+        if not self.targets:
+            self.clear_preview()
+            scriptcontext.doc.Views.Redraw()
+            return
+
+        engines = {"grid": grid}
+        engine = engines.get(self.params.get("pattern_mode", "grid"))
+        if engine is None:
+            return
+        placements = engine.generate(self)
+
+        nurbs_unit, draft_unit = shapes.unit_shape(
+            self.params.get("shape", "circle"), self.params.get("slot_ratio", 0.4)
+        )
+        if draft:
+            curves = []
+            for record, u, v, size, rotation in placements:
+                curve = mapping.place_unit_curve_flat(record, u, v, draft_unit, size, rotation)
+                if curve is not None:
+                    curves.append(curve)
+            self.preview_draft_curves = curves
+        else:
+            self.pullback_failures = 0
+            curves = []
+            for record, u, v, size, rotation in placements:
+                curve, pulled = mapping.place_unit_curve(record, u, v, nurbs_unit, size, rotation)
+                if curve is not None:
+                    curves.append(curve)
+                    if not pulled:
+                        self.pullback_failures += 1
+            self.preview_curves = curves
+            if self.pullback_failures:
+                Rhino.RhinoApp.WriteLine(
+                    "SurfacePattern: {} curves failed pullback (planar fallback used).".format(
+                        self.pullback_failures
+                    )
+                )
+        get_conduit().enable()  # enables when needed; always redraws
 
 
 def get_session():

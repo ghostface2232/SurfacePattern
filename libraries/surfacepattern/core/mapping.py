@@ -19,6 +19,15 @@ def _normalize(face_record, su, sv):
     return (su - u0) / (u1 - u0), (sv - v0) / (v1 - v0)
 
 
+def is_point_on_face(face_record, u, v):
+    """True when normalized (u, v) lies on the trimmed region of the face."""
+    face = face_record.resolve_face()
+    if face is None:
+        return False
+    su, sv = _denormalize(face_record, u, v)
+    return face.IsPointOnFace(su, sv) != Rhino.Geometry.PointFaceRelation.Exterior
+
+
 def uv_grid(face_record, u_count, v_count):
     """Uniform normalized-UV grid over the face, culling points outside the trimmed region."""
     face = face_record.resolve_face()
@@ -59,18 +68,8 @@ def local_scale(face_record, u, v):
     return derivatives[0].Length * span_u, derivatives[1].Length * span_v
 
 
-def world_grid_projection(face_records, spacing, plane, max_distance=None):
-    """Project a planar world grid onto the nearest face; returns [(face_record, u, v), ...] normalized.
-
-    Grid extent covers the union bounding box of all faces expressed in plane coordinates.
-    A point is kept only for its closest face, only if it lands on the trimmed region, and
-    only if the projection distance stays under max_distance (default: half the bounding-box
-    diagonal, floored at document tolerance) — far misses pulled to face borders are culled.
-    """
-    if spacing <= 0.0 or not face_records:
-        return []
-    tolerance = scriptcontext.doc.ModelAbsoluteTolerance
-
+def _resolve_with_bbox(face_records):
+    """Resolve live faces and their union bounding box: ([(record, face), ...], bbox)."""
     resolved = []
     bbox = Rhino.Geometry.BoundingBox.Empty
     for record in face_records:
@@ -79,13 +78,30 @@ def world_grid_projection(face_records, spacing, plane, max_distance=None):
             continue
         resolved.append((record, face))
         bbox.Union(face.GetBoundingBox(True))
-    if not resolved or not bbox.IsValid:
-        return []
+    return resolved, bbox
 
-    if max_distance is None:
-        max_distance = max(bbox.Diagonal.Length * 0.5, tolerance)
 
-    # Grid extent: bounding-box corners expressed in plane (s, t) coordinates.
+def default_projection_plane(face_records):
+    """Axis-aligned plane through the bbox center facing its widest side; None without targets."""
+    _resolved, bbox = _resolve_with_bbox(face_records)
+    if not bbox.IsValid:
+        return None
+    extent = bbox.Max - bbox.Min
+    center = bbox.Center
+    if extent.Z <= extent.X and extent.Z <= extent.Y:
+        normal = Rhino.Geometry.Vector3d.ZAxis
+    elif extent.Y <= extent.X:
+        normal = Rhino.Geometry.Vector3d.YAxis
+    else:
+        normal = Rhino.Geometry.Vector3d.XAxis
+    return Rhino.Geometry.Plane(center, normal)
+
+
+def plane_grid_extent(face_records, plane):
+    """Targets' bbox expressed in plane coordinates: (s_min, s_max, t_min, t_max); None if empty."""
+    _resolved, bbox = _resolve_with_bbox(face_records)
+    if not bbox.IsValid:
+        return None
     s_values, t_values = [], []
     for corner in bbox.GetCorners():
         ok, s, t = plane.ClosestParameter(corner)
@@ -93,29 +109,64 @@ def world_grid_projection(face_records, spacing, plane, max_distance=None):
             s_values.append(s)
             t_values.append(t)
     if not s_values:
-        return []
+        return None
+    return min(s_values), max(s_values), min(t_values), max(t_values)
 
-    placements = []
-    s_count = int((max(s_values) - min(s_values)) / spacing) + 1
-    t_count = int((max(t_values) - min(t_values)) / spacing) + 1
+
+def project_plane_points(face_records, plane, points, max_distance=None):
+    """Project plane-space (s, t) points onto the closest face.
+
+    Returns a list aligned with the input: (face_record, u, v) with normalized UV for
+    projected points, None for culled ones. A point is kept only for its closest face,
+    only when it lands on the trimmed region, and only when the projection distance
+    stays under max_distance (default: half the targets' bbox diagonal, floored at
+    document tolerance) — far misses pulled to face borders are culled.
+    """
+    resolved, bbox = _resolve_with_bbox(face_records)
+    if not resolved or not bbox.IsValid:
+        return [None] * len(points)
+    if max_distance is None:
+        max_distance = max(
+            bbox.Diagonal.Length * 0.5, scriptcontext.doc.ModelAbsoluteTolerance
+        )
+
+    results = []
+    for s, t in points:
+        grid_point = plane.PointAt(s, t)
+        best = None
+        for record, face in resolved:
+            ok, su, sv = face.ClosestPoint(grid_point)
+            if not ok:
+                continue
+            if face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
+                continue
+            distance = grid_point.DistanceTo(record.surface.PointAt(su, sv))
+            if best is None or distance < best[0]:
+                best = (distance, record, su, sv)
+        if best is not None and best[0] <= max_distance:
+            _distance, record, su, sv = best
+            u, v = _normalize(record, su, sv)
+            results.append((record, u, v))
+        else:
+            results.append(None)
+    return results
+
+
+def world_grid_projection(face_records, spacing, plane, max_distance=None):
+    """Project a square planar world grid onto the nearest face; [(face_record, u, v), ...]."""
+    if spacing <= 0.0 or not face_records:
+        return []
+    extent = plane_grid_extent(face_records, plane)
+    if extent is None:
+        return []
+    s_min, s_max, t_min, t_max = extent
+    points = []
+    s_count = int((s_max - s_min) / spacing) + 1
+    t_count = int((t_max - t_min) / spacing) + 1
     for i in range(s_count + 1):
         for j in range(t_count + 1):
-            grid_point = plane.PointAt(min(s_values) + i * spacing, min(t_values) + j * spacing)
-            best = None
-            for record, face in resolved:
-                ok, su, sv = face.ClosestPoint(grid_point)
-                if not ok:
-                    continue
-                if face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
-                    continue
-                distance = grid_point.DistanceTo(record.surface.PointAt(su, sv))
-                if best is None or distance < best[0]:
-                    best = (distance, record, su, sv)
-            if best is not None and best[0] <= max_distance:
-                _distance, record, su, sv = best
-                u, v = _normalize(record, su, sv)
-                placements.append((record, u, v))
-    return placements
+            points.append((s_min + i * spacing, t_min + j * spacing))
+    return [hit for hit in project_plane_points(face_records, plane, points, max_distance) if hit]
 
 
 def place_unit_curve_flat(face_record, u, v, unit_curve, size, rotation):
