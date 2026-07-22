@@ -56,6 +56,14 @@ def make_label(text):
     return label
 
 
+def add_list_item(collection, text):
+    """Add a text item to an Eto item collection — pythonnet may not apply the implicit
+    string-to-ListItem conversion that Items.Add("text") relies on."""
+    item = Eto.Forms.ListItem()
+    item.Text = text
+    collection.Add(item)
+
+
 def eto_handler(func):
     """Wrap an Eto event handler with try/except — Eto swallows handler exceptions silently.
 
@@ -242,7 +250,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.mode_segment.Orientation = Eto.Forms.Orientation.Horizontal
         self.mode_segment.Spacing = Eto.Drawing.Size(8, 0)
         for mode in PATTERN_MODES:
-            self.mode_segment.Items.Add(mode.capitalize())
+            add_list_item(self.mode_segment.Items, mode.capitalize())
         current_mode = session.params.get("pattern_mode", "grid")
         self.mode_segment.SelectedIndex = (
             PATTERN_MODES.index(current_mode) if current_mode in PATTERN_MODES else 0
@@ -275,7 +283,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         # (5) Fixed footer: preset dropdown + save (placeholders), bake button.
         # Destructive actions run only from these explicit clicks.
         self.preset_dropdown = Eto.Forms.DropDown()
-        self.preset_dropdown.Items.Add("(default)")
+        add_list_item(self.preset_dropdown.Items, "(default)")
         self.preset_dropdown.SelectedIndex = 0
         self.save_preset_button = Eto.Forms.Button()
         self.save_preset_button.Text = "Save"
@@ -370,7 +378,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
     def _dropdown(self, options, current, key):
         dropdown = Eto.Forms.DropDown()
         for option in options:
-            dropdown.Items.Add(option)
+            add_list_item(dropdown.Items, option)
         dropdown.SelectedIndex = options.index(current) if current in options else 0
         dropdown.SelectedIndexChanged += eto_handler(
             lambda sender, _event, key=key, options=options: self._param_changed(

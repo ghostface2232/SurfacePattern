@@ -30,10 +30,10 @@
   },
   "codes": [
     {
-      "id": "b9cb35fd-2119-41b4-b853-27f0a46a817a",
+      "id": "b669fe12-00f8-48ba-a511-c8f6a3125b73",
       "language": {
-        "id": "mcneel.pythonnet.python",
-        "version": "3.9.10"
+        "id": "*.*.python",
+        "version": "3.*.*"
       },
       "title": "SurfacePattern_cmd",
       "uri": "commands/SurfacePattern_cmd.py"
