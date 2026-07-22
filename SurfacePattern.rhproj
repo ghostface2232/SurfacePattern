@@ -1,0 +1,54 @@
+{
+  "host": {
+    "name": "Rhino3D",
+    "version": "8.29.26063\u002B11001",
+    "os": "windows",
+    "arch": "x64"
+  },
+  "id": "4ce29f72-0601-4626-92c6-7a72738e5faa",
+  "identity": {
+    "name": "surfacepattern",
+    "version": "0.1",
+    "publisher": {
+      "email": "baemingwan@gmail.com",
+      "name": "Mingwan Bae"
+    }
+  },
+  "settings": {
+    "buildPath": "build/",
+    "buildTarget": {
+      "host": {
+        "name": "Rhino3D",
+        "version": "8"
+      },
+      "title": "Rhino3D (8.*)",
+      "slug": "rh8"
+    },
+    "publishTarget": {
+      "title": "McNeel Yak Server"
+    }
+  },
+  "codes": [
+    {
+      "id": "b9cb35fd-2119-41b4-b853-27f0a46a817a",
+      "language": {
+        "id": "mcneel.pythonnet.python",
+        "version": "3.9.10"
+      },
+      "title": "SurfacePattern_cmd",
+      "uri": "commands/SurfacePattern_cmd.py"
+    }
+  ],
+  "libraries": [
+    {
+      "type": "uri",
+      "library": {
+        "base": "libraries/surfacepattern/",
+        "language": {
+          "id": "*.*.python",
+          "version": "3.*.*"
+        }
+      }
+    }
+  ]
+}
