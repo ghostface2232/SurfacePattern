@@ -36,6 +36,7 @@ class PatternSession:
     """Singleton holding targets, pattern parameters, and the preview cache."""
 
     targets: list = field(default_factory=list)      # list of FaceRecord
+    attractors: list = field(default_factory=list)   # document object ids (points/curves)
     params: dict = field(default_factory=dict)       # current pattern parameters
     preview_curves: list = field(default_factory=list)        # full NURBS curves
     preview_draft_curves: list = field(default_factory=list)  # polyline approximations
@@ -52,6 +53,27 @@ class PatternSession:
         removed = len(self.targets) - len(alive)
         self.targets = alive
         return removed
+
+    def resolve_attractors(self):
+        """Live attractor geometry as (points, curves), silently pruning deleted ids.
+
+        Geometry is re-fetched from the document on every call so moved attractors
+        are always current.
+        """
+        points, curves, alive = [], [], []
+        for object_id in self.attractors:
+            rhobj = scriptcontext.doc.Objects.FindId(object_id)
+            if rhobj is None:
+                continue
+            geometry = rhobj.Geometry
+            if isinstance(geometry, Rhino.Geometry.Point):
+                points.append(geometry.Location)
+                alive.append(object_id)
+            elif isinstance(geometry, Rhino.Geometry.Curve):
+                curves.append(geometry)
+                alive.append(object_id)
+        self.attractors = alive
+        return points, curves
 
     def clear_preview(self):
         """Empty both preview curve caches."""
@@ -77,7 +99,7 @@ class PatternSession:
         """Run the active pattern engine and rebuild the preview cache (draft skips pullback)."""
         # Local imports keep module load order safe (preview.conduit imports this module).
         from surfacepattern.core import mapping
-        from surfacepattern.engine import grid, shapes
+        from surfacepattern.engine import grid, halftone, shapes
         from surfacepattern.preview.conduit import get_conduit
 
         self.preview_quality = "draft" if draft else "full"
@@ -87,7 +109,7 @@ class PatternSession:
             scriptcontext.doc.Views.Redraw()
             return
 
-        engines = {"grid": grid}
+        engines = {"grid": grid, "halftone": halftone}
         engine = engines.get(self.params.get("pattern_mode", "grid"))
         if engine is None:
             return
@@ -184,4 +206,23 @@ def pick_targets(session=None):
     session.targets = records
     session.clear_preview()
     session.params["placement_mode"] = session.suggest_placement_mode()
+    return True
+
+
+def pick_attractors(session=None):
+    """Interactively pick document points/curves as attractors; True on success."""
+    session = session if session is not None else get_session()
+
+    getter = Rhino.Input.Custom.GetObject()
+    getter.SetCommandPrompt("Select attractor points or curves")
+    getter.GeometryFilter = (
+        Rhino.DocObjects.ObjectType.Point | Rhino.DocObjects.ObjectType.Curve
+    )
+    getter.SubObjectSelect = False
+    getter.GroupSelect = False
+    getter.GetMultiple(1, 0)
+    if getter.CommandResult() != Rhino.Commands.Result.Success:
+        return False
+
+    session.attractors = [objref.ObjectId for objref in getter.Objects()]
     return True

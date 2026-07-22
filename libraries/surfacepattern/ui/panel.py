@@ -24,6 +24,7 @@ PATTERN_MODES = ["grid", "halftone", "stamp"]
 SHAPE_OPTIONS = ["circle", "slot", "hex"]
 GRID_TYPE_OPTIONS = ["square", "staggered", "triangular"]
 PLACEMENT_OPTIONS = ["uv", "world"]
+HALFTONE_PROFILES = ["linear", "smooth", "gaussian"]
 
 PARAM_DEFAULTS = {
     "pattern_mode": "grid",
@@ -39,6 +40,12 @@ PARAM_DEFAULTS = {
     "jitter_rotation": 0.0,
     "rotation": 0.0,
     "seed": 0,
+    "halftone_radius": 50.0,
+    "halftone_profile": "linear",
+    "halftone_invert": False,
+    "halftone_size_min": 1.0,
+    "halftone_size_max": 6.0,
+    "halftone_cull": 0.0,
 }
 
 
@@ -239,7 +246,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         # (3) Per-mode parameter sections, collapsible.
         self.mode_sections = {
             "grid": self._grid_section(session),
-            "halftone": self._placeholder_section("Halftone", "Halftone parameters — next milestone."),
+            "halftone": self._halftone_section(session),
             "stamp": self._placeholder_section("Stamp", "Stamp parameters — next milestone."),
         }
         for mode in PATTERN_MODES:
@@ -295,6 +302,35 @@ class SurfacePatternPanel(Eto.Forms.Form):
         grid.AddRow(*self._slider("Seed", "seed", 0.0, 9999.0, 1.0, ""))
         return self._expander("Grid", grid)
 
+    def _halftone_section(self, session):
+        self.attractor_button = Eto.Forms.Button()
+        self.attractor_button.Text = "Pick Attractors"
+        self.attractor_button.Click += eto_handler(self._pick_attractors)
+        self.attractor_label = Eto.Forms.Label()
+        self.attractor_label.Text = self._attractor_summary(session)
+        self.profile_dropdown = self._dropdown(
+            HALFTONE_PROFILES, session.params.get("halftone_profile", "linear"), "halftone_profile"
+        )
+        self.invert_checkbox = Eto.Forms.CheckBox()
+        self.invert_checkbox.Text = "Invert (small near attractors)"
+        self.invert_checkbox.Checked = bool(session.params.get("halftone_invert", False))
+        self.invert_checkbox.CheckedChanged += eto_handler(
+            lambda _sender, _event: self._param_changed(
+                "halftone_invert", bool(self.invert_checkbox.Checked), True
+            )
+        )
+
+        halftone = Eto.Forms.DynamicLayout()
+        halftone.Spacing = Eto.Drawing.Size(6, 4)
+        halftone.AddRow(self.attractor_button, self.attractor_label, None)
+        halftone.AddRow(*self._slider("Radius", "halftone_radius", 1.0, 500.0, 1.0, "mm"))
+        halftone.AddRow(*self._slider("Size Min", "halftone_size_min", 0.0, 50.0, 0.1, "mm"))
+        halftone.AddRow(*self._slider("Size Max", "halftone_size_max", 0.0, 50.0, 0.1, "mm"))
+        halftone.AddRow(Eto.Forms.Label(Text="Profile"), self.profile_dropdown, None)
+        halftone.AddRow(self.invert_checkbox, None)
+        halftone.AddRow(*self._slider("Cull Below", "halftone_cull", 0.0, 20.0, 0.1, "mm"))
+        return self._expander("Halftone", halftone)
+
     def _placeholder_section(self, title, message):
         content = Eto.Forms.DynamicLayout()
         content.Spacing = Eto.Drawing.Size(6, 4)
@@ -347,9 +383,18 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.error_label.Text = ""
 
     def _recompute(self, draft):
-        """Recompute via the session and clear the error notice on success."""
-        get_session().request_recompute(draft)
+        """Recompute via the session; refresh labels and clear the error notice on success."""
+        session = get_session()
+        session.request_recompute(draft)
+        # Recompute prunes dead targets/attractors — keep the labels truthful.
+        self.target_label.Text = self._target_summary(session)
+        self.attractor_label.Text = self._attractor_summary(session)
         self.clear_error()
+
+    def _attractor_summary(self, session):
+        if not session.attractors:
+            return "0 — face centers"
+        return "{} attractor(s)".format(len(session.attractors))
 
     def _target_summary(self, session):
         if not session.targets:
@@ -416,6 +461,19 @@ class SurfacePatternPanel(Eto.Forms.Form):
             mode = session.params.get("placement_mode", "uv")
             if mode in PLACEMENT_OPTIONS:
                 self.placement_dropdown.SelectedIndex = PLACEMENT_OPTIONS.index(mode)
+            self._recompute(False)
+
+    def _pick_attractors(self, _sender, _event):
+        from surfacepattern.core.session import pick_attractors
+
+        session = get_session()
+        self.Enabled = False  # lock panel input during viewport picking
+        try:
+            picked = pick_attractors(session)
+        finally:
+            self.Enabled = True
+        self.attractor_label.Text = self._attractor_summary(session)
+        if picked and session.targets:
             self._recompute(False)
 
     def _save_preset(self, _sender, _event):

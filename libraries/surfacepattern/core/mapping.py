@@ -45,6 +45,12 @@ def uv_grid(face_record, u_count, v_count):
     return points
 
 
+def point_at(face_record, u, v):
+    """3D surface point at normalized (u, v)."""
+    su, sv = _denormalize(face_record, u, v)
+    return face_record.surface.PointAt(su, sv)
+
+
 def local_frame(face_record, u, v):
     """Return the surface frame (Plane) at normalized (u, v) with Z pointing outward; None on failure."""
     su, sv = _denormalize(face_record, u, v)
