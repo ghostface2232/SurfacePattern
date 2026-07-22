@@ -118,6 +118,26 @@ def world_grid_projection(face_records, spacing, plane, max_distance=None):
     return placements
 
 
+def place_unit_curve_flat(face_record, u, v, unit_curve, size, rotation):
+    """Orient a unit curve onto the local frame at normalized (u, v) without pullback.
+
+    Draft-preview path: scales by size, rotates by rotation (radians) about the local
+    normal, and returns the planar curve lying on the frame; None when the frame
+    cannot be evaluated. Never calls PullToBrepFace.
+    """
+    frame = local_frame(face_record, u, v)
+    if frame is None:
+        return None
+    curve = unit_curve.DuplicateCurve()
+    scale = Rhino.Geometry.Transform.Scale(Rhino.Geometry.Point3d.Origin, size)
+    rotate = Rhino.Geometry.Transform.Rotation(
+        rotation, Rhino.Geometry.Vector3d.ZAxis, Rhino.Geometry.Point3d.Origin
+    )
+    orient = Rhino.Geometry.Transform.PlaneToPlane(Rhino.Geometry.Plane.WorldXY, frame)
+    curve.Transform(orient * rotate * scale)
+    return curve
+
+
 def place_unit_curve(face_record, u, v, unit_curve, size, rotation):
     """Orient a unit curve (XY plane, origin-centered) onto the face at normalized (u, v).
 
@@ -126,17 +146,9 @@ def place_unit_curve(face_record, u, v, unit_curve, size, rotation):
     and the returned curve is the planar fallback lying on the local frame. (None, False)
     when the frame itself cannot be evaluated.
     """
-    frame = local_frame(face_record, u, v)
-    if frame is None:
+    curve = place_unit_curve_flat(face_record, u, v, unit_curve, size, rotation)
+    if curve is None:
         return None, False
-
-    curve = unit_curve.DuplicateCurve()
-    scale = Rhino.Geometry.Transform.Scale(Rhino.Geometry.Point3d.Origin, size)
-    rotate = Rhino.Geometry.Transform.Rotation(
-        rotation, Rhino.Geometry.Vector3d.ZAxis, Rhino.Geometry.Point3d.Origin
-    )
-    orient = Rhino.Geometry.Transform.PlaneToPlane(Rhino.Geometry.Plane.WorldXY, frame)
-    curve.Transform(orient * rotate * scale)
 
     face = face_record.resolve_face()
     if face is not None:

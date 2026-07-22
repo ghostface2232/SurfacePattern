@@ -37,7 +37,8 @@ class PatternSession:
 
     targets: list = field(default_factory=list)      # list of FaceRecord
     params: dict = field(default_factory=dict)       # current pattern parameters
-    preview_curves: list = field(default_factory=list)
+    preview_curves: list = field(default_factory=list)        # full NURBS curves
+    preview_draft_curves: list = field(default_factory=list)  # polyline approximations
     preview_quality: str = "draft"                   # "draft" | "full"
 
     def suggest_placement_mode(self):
@@ -52,8 +53,19 @@ class PatternSession:
         return removed
 
     def clear_preview(self):
-        """Empty the preview curve cache."""
+        """Empty both preview curve caches."""
         self.preview_curves = []
+        self.preview_draft_curves = []
+
+    def set_preview(self, curves, draft_curves):
+        """Cache full curves and draft approximations, then request a redraw."""
+        self.preview_curves = list(curves)
+        self.preview_draft_curves = list(draft_curves)
+        scriptcontext.doc.Views.Redraw()
+
+    def request_recompute(self, draft):
+        """Placeholder: engine recompute wiring lands in a later step."""
+        self.preview_quality = "draft" if draft else "full"
 
 
 def get_session():
