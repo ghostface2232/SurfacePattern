@@ -9,8 +9,8 @@ from surfacepattern.core import mapping
 DEFAULTS = {
     "shape": "circle",
     "size": 4.0,             # mm
-    "spacing_x": 10.0,       # mm
-    "spacing_y": 10.0,       # mm
+    "spacing_x": 10.0,       # mm; clear gap between shape edges (not center distance)
+    "spacing_y": 10.0,       # mm; clear gap between shape edges (not center distance)
     "grid_type": "square",   # "square" | "staggered" | "triangular"
     "rotation": 0.0,         # degrees, applied to every unit shape
     "jitter_position": 0.0,  # 0-100 (%)
@@ -36,6 +36,30 @@ def generate(session):
     return _generate_uv(session)
 
 
+def _shape_extent(session):
+    """Nominal shape footprint (x, y) in mm, used to convert gap spacing to center steps.
+
+    Halftone mode modulates sizes up to halftone_size_max, so that is the extent
+    guaranteeing the typed gap at the largest shapes. Rotation is ignored: the slot
+    footprint assumes rotation 0.
+    """
+    if session.params.get("pattern_mode", "grid") == "halftone":
+        size = float(session.params.get("halftone_size_max", 6.0))
+    else:
+        size = float(param(session, "size"))
+    if param(session, "shape") == "slot":
+        return size, size * float(param(session, "slot_ratio"))
+    return size, size
+
+
+def _center_steps(session):
+    """Center-to-center lattice steps (x, y) in mm: typed gap + shape footprint."""
+    gap_x = max(float(param(session, "spacing_x")), 0.0)
+    gap_y = max(float(param(session, "spacing_y")), 0.0)
+    extent_x, extent_y = _shape_extent(session)
+    return max(gap_x + extent_x, 1e-3), max(gap_y + extent_y, 1e-3)
+
+
 def _jittered_attributes(session, rng):
     """One placement's (size, rotation_radians) with size/rotation jitter applied."""
     size = float(param(session, "size"))
@@ -59,8 +83,7 @@ def _generate_uv(session):
 
 
 def _face_lattice(session, record, rng):
-    spacing_x = max(float(param(session, "spacing_x")), 1e-3)
-    spacing_y = max(float(param(session, "spacing_y")), 1e-3)
+    step_x, step_y = _center_steps(session)
     grid_type = param(session, "grid_type")
     stagger = grid_type in ("staggered", "triangular")
     row_factor = math.sqrt(3.0) / 2.0 if grid_type == "triangular" else 1.0
@@ -76,8 +99,8 @@ def _face_lattice(session, record, rng):
         if scale is None or scale[0] <= 1e-9 or scale[1] <= 1e-9:
             break
         scale_u, scale_v = scale
-        du = spacing_x / scale_u                # normalized-UV column step for this row
-        dv = spacing_y * row_factor / scale_v   # normalized-UV step to the next row
+        du = step_x / scale_u                # normalized-UV column step for this row
+        dv = step_y * row_factor / scale_v   # normalized-UV step to the next row
         if v is None:
             v = dv * 0.5
         if v >= 1.0:
@@ -115,27 +138,26 @@ def _generate_world(session):
         return []
     s_min, s_max, t_min, t_max = extent
 
-    spacing_x = max(float(param(session, "spacing_x")), 1e-3)
-    spacing_y = max(float(param(session, "spacing_y")), 1e-3)
+    step_x, step_y = _center_steps(session)
     grid_type = param(session, "grid_type")
     stagger = grid_type in ("staggered", "triangular")
     row_factor = math.sqrt(3.0) / 2.0 if grid_type == "triangular" else 1.0
     position_jitter = float(param(session, "jitter_position")) / 100.0
-    row_step = spacing_y * row_factor
+    row_step = step_y * row_factor
 
     points = []
     row_index = 0
     t = t_min + row_step * 0.5
     while t < t_max and row_index < MAX_ROWS:
-        s = s_min + spacing_x * 0.5 + (spacing_x * 0.5 if stagger and row_index % 2 else 0.0)
+        s = s_min + step_x * 0.5 + (step_x * 0.5 if stagger and row_index % 2 else 0.0)
         column = 0
         while s < s_max and column < MAX_COLS:
             ss, tt = s, t
             if position_jitter > 0.0:
-                ss += position_jitter * spacing_x * rng.uniform(-0.5, 0.5)
+                ss += position_jitter * step_x * rng.uniform(-0.5, 0.5)
                 tt += position_jitter * row_step * rng.uniform(-0.5, 0.5)
             points.append((ss, tt))
-            s += spacing_x
+            s += step_x
             column += 1
         t += row_step
         row_index += 1
