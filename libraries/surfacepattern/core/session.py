@@ -64,6 +64,15 @@ class PatternSession:
         self.preview_draft_curves = list(draft_curves)
         scriptcontext.doc.Views.Redraw()
 
+    def set_preview_enabled(self, enabled):
+        """Turn the preview conduit on/off — the ui layer's only path to the conduit."""
+        from surfacepattern.preview.conduit import get_conduit
+
+        if enabled:
+            get_conduit().enable()
+        else:
+            get_conduit().disable()
+
     def request_recompute(self, draft):
         """Run the active pattern engine and rebuild the preview cache (draft skips pullback)."""
         # Local imports keep module load order safe (preview.conduit imports this module).

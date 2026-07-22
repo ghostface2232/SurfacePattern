@@ -1,5 +1,11 @@
 #! python3
 # Eto panel UI: LabeledSlider, sections, footer actions (talks only to the session).
+#
+# Implementation note: a dockable Rhino.UI.Panels panel requires registering a .NET
+# panel type under a plugin GUID, which a CPython ScriptEditor project cannot do
+# reliably, so this is a modeless Eto.Forms.Form instead, parented to the Rhino main
+# window (Rhino.UI.RhinoEtoApp, per-document overload when available) so it never
+# falls behind Rhino.
 
 import traceback
 
@@ -11,10 +17,11 @@ import scriptcontext
 from surfacepattern.core.session import get_session
 
 PANEL_STICKY_KEY = "surfacepattern_panel"
-DRAFT_INTERVAL = 0.07    # seconds; draft recompute while dragging
+DRAFT_INTERVAL = 0.07    # seconds; draft recompute cadence while dragging
 COMMIT_INTERVAL = 0.25   # seconds of inactivity before the full recompute
 NOTICE_INTERVAL = 0.8    # seconds the clamp notice stays visible
 
+PATTERN_MODES = ["grid", "halftone", "stamp"]
 SHAPE_OPTIONS = ["circle", "slot", "hex"]
 GRID_TYPE_OPTIONS = ["square", "staggered", "triangular"]
 PLACEMENT_OPTIONS = ["uv", "world"]
@@ -47,13 +54,15 @@ def eto_handler(func):
 
 
 class LabeledSlider:
-    """Label + slider + numeric field on one row, two-way synced.
+    """Label + Slider + numeric field on one row, two-way synced.
 
-    Double-click restores the default; out-of-range numeric input clamps to the nearest
-    valid value with a brief background-color notice on the text field.
+    Slider drags request draft recomputes; mouse-up, 250ms of inactivity (owner timer),
+    or committed numeric entry request full recomputes. Double-click restores the
+    default; out-of-range input clamps to the nearest valid value with a brief
+    background-color notice.
     """
 
-    def __init__(self, label, minimum, maximum, default, step=1.0, on_change=None):
+    def __init__(self, label, minimum, maximum, step, default, unit="", on_change=None):
         self.minimum = minimum
         self.maximum = maximum
         self.default = default
@@ -68,17 +77,21 @@ class LabeledSlider:
         self.slider.MinValue = int(round(minimum * self._scale))
         self.slider.MaxValue = int(round(maximum * self._scale))
         self.slider.Value = int(round(default * self._scale))
-        self.slider.Width = 130
+        self.slider.Width = 120
         self.slider.ValueChanged += eto_handler(self._slider_changed)
+        self.slider.MouseUp += eto_handler(self._slider_released)
         self.slider.MouseDoubleClick += eto_handler(self._restore_default)
 
         self.textbox = Eto.Forms.TextBox()
-        self.textbox.Width = 52
+        self.textbox.Width = 48
         self.textbox.Text = self._format(default)
         self._normal_background = self.textbox.BackgroundColor
         self.textbox.KeyDown += eto_handler(self._textbox_keydown)
         self.textbox.LostFocus += eto_handler(self._textbox_commit)
         self.textbox.MouseDoubleClick += eto_handler(self._restore_default)
+
+        self.unit_label = Eto.Forms.Label()
+        self.unit_label.Text = unit
 
         self._notice_timer = Eto.Forms.UITimer()
         self._notice_timer.Interval = NOTICE_INTERVAL
@@ -87,6 +100,14 @@ class LabeledSlider:
     @property
     def value(self):
         return self.slider.Value / self._scale
+
+    def row(self):
+        field = Eto.Forms.StackLayout()
+        field.Orientation = Eto.Forms.Orientation.Horizontal
+        field.Spacing = 2
+        field.Items.Add(Eto.Forms.StackLayoutItem(self.textbox))
+        field.Items.Add(Eto.Forms.StackLayoutItem(self.unit_label))
+        return [self.label, self.slider, field]
 
     def _format(self, number):
         return "{:g}".format(round(number, 3))
@@ -110,6 +131,11 @@ class LabeledSlider:
         self._updating = False
         if self.on_change is not None:
             self.on_change(self.value, False)
+
+    def _slider_released(self, _sender, _event):
+        # Mouse-up ends the drag: commit a full recompute at the final value.
+        if self.on_change is not None:
+            self.on_change(self.value, True)
 
     def _restore_default(self, _sender, _event):
         self._set_value(self.default, True)
@@ -141,12 +167,9 @@ class LabeledSlider:
         self._notice_timer.Stop()
         self.textbox.BackgroundColor = self._normal_background
 
-    def row(self):
-        return [self.label, self.slider, self.textbox]
-
 
 class SurfacePatternPanel(Eto.Forms.Form):
-    """Modeless panel driving the session; sliders never mutate the document."""
+    """Modeless panel driving the session; only the Bake button may mutate the document."""
 
     def __init__(self):
         super().__init__()
@@ -169,6 +192,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self._commit_timer.Elapsed += eto_handler(self._commit_tick)
 
         self.Content = self._build_layout(session)
+        self._apply_mode_visibility(session.params.get("pattern_mode", "grid"))
+        self.Shown += eto_handler(self._on_shown)
         self.Closed += eto_handler(self._on_closed)
 
     # ---- layout -------------------------------------------------------------
@@ -177,7 +202,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         layout = Eto.Forms.DynamicLayout()
         layout.Spacing = Eto.Drawing.Size(6, 6)
 
-        # Target section.
+        # (1) Target section: pick button, summary label, placement-mode dropdown.
         self.pick_button = Eto.Forms.Button()
         self.pick_button.Text = "Pick Targets"
         self.pick_button.Click += eto_handler(self._pick_targets)
@@ -189,7 +214,50 @@ class SurfacePatternPanel(Eto.Forms.Form):
         layout.AddRow(self.pick_button, self.target_label, None)
         layout.AddRow(Eto.Forms.Label(Text="Placement"), self.placement_dropdown, None)
 
-        # Grid section, most-used first: shape, size, spacing, grid type, jitter, rotation, seed.
+        # (2) Pattern-mode segment: grid / halftone / stamp.
+        self.mode_segment = Eto.Forms.RadioButtonList()
+        self.mode_segment.Orientation = Eto.Forms.Orientation.Horizontal
+        self.mode_segment.Spacing = Eto.Drawing.Size(8, 0)
+        for mode in PATTERN_MODES:
+            self.mode_segment.Items.Add(mode.capitalize())
+        current_mode = session.params.get("pattern_mode", "grid")
+        self.mode_segment.SelectedIndex = (
+            PATTERN_MODES.index(current_mode) if current_mode in PATTERN_MODES else 0
+        )
+        self.mode_segment.SelectedIndexChanged += eto_handler(self._mode_changed)
+        layout.AddRow(self.mode_segment, None)
+
+        # (3) Per-mode parameter sections, collapsible.
+        self.mode_sections = {
+            "grid": self._grid_section(session),
+            "halftone": self._placeholder_section("Halftone", "Halftone parameters — next milestone."),
+            "stamp": self._placeholder_section("Stamp", "Stamp parameters — next milestone."),
+        }
+        for mode in PATTERN_MODES:
+            layout.AddRow(self.mode_sections[mode])
+
+        # (4) Preview toggle.
+        self.preview_checkbox = Eto.Forms.CheckBox()
+        self.preview_checkbox.Text = "Preview"
+        self.preview_checkbox.Checked = True
+        self.preview_checkbox.CheckedChanged += eto_handler(self._preview_toggled)
+        layout.AddRow(self.preview_checkbox, None)
+
+        # (5) Fixed footer: preset dropdown + save (placeholders), bake button.
+        # Destructive actions run only from these explicit clicks.
+        self.preset_dropdown = Eto.Forms.DropDown()
+        self.preset_dropdown.Items.Add("(default)")
+        self.preset_dropdown.SelectedIndex = 0
+        self.save_preset_button = Eto.Forms.Button()
+        self.save_preset_button.Text = "Save"
+        self.save_preset_button.Click += eto_handler(self._save_preset)
+        self.bake_button = Eto.Forms.Button()
+        self.bake_button.Text = "Bake"
+        self.bake_button.Click += eto_handler(self._bake)
+        layout.AddRow(self.preset_dropdown, self.save_preset_button, self.bake_button)
+        return layout
+
+    def _grid_section(self, session):
         self.shape_dropdown = self._dropdown(
             SHAPE_OPTIONS, session.params.get("shape", "circle"), "shape"
         )
@@ -200,33 +268,41 @@ class SurfacePatternPanel(Eto.Forms.Form):
         grid = Eto.Forms.DynamicLayout()
         grid.Spacing = Eto.Drawing.Size(6, 4)
         grid.AddRow(Eto.Forms.Label(Text="Shape"), self.shape_dropdown, None)
-        grid.AddRow(*self._slider("Size (mm)", "size", 0.5, 50.0, 0.1))
-        grid.AddRow(*self._slider("Slot Ratio", "slot_ratio", 0.1, 1.0, 0.05))
-        grid.AddRow(*self._slider("Spacing X (mm)", "spacing_x", 1.0, 100.0, 0.5))
-        grid.AddRow(*self._slider("Spacing Y (mm)", "spacing_y", 1.0, 100.0, 0.5))
+        grid.AddRow(*self._slider("Size", "size", 0.5, 50.0, 0.1, "mm"))
+        grid.AddRow(*self._slider("Slot Ratio", "slot_ratio", 0.1, 1.0, 0.05, ""))
+        grid.AddRow(*self._slider("Spacing X", "spacing_x", 1.0, 100.0, 0.5, "mm"))
+        grid.AddRow(*self._slider("Spacing Y", "spacing_y", 1.0, 100.0, 0.5, "mm"))
         grid.AddRow(Eto.Forms.Label(Text="Grid Type"), self.grid_type_dropdown, None)
-        grid.AddRow(*self._slider("Jitter Pos %", "jitter_position", 0.0, 100.0, 1.0))
-        grid.AddRow(*self._slider("Jitter Size %", "jitter_size", 0.0, 100.0, 1.0))
-        grid.AddRow(*self._slider("Jitter Rot %", "jitter_rotation", 0.0, 100.0, 1.0))
-        grid.AddRow(*self._slider("Rotation (deg)", "rotation", 0.0, 360.0, 1.0))
-        grid.AddRow(*self._slider("Seed", "seed", 0.0, 9999.0, 1.0))
+        grid.AddRow(*self._slider("Jitter Pos", "jitter_position", 0.0, 100.0, 1.0, "%"))
+        grid.AddRow(*self._slider("Jitter Size", "jitter_size", 0.0, 100.0, 1.0, "%"))
+        grid.AddRow(*self._slider("Jitter Rot", "jitter_rotation", 0.0, 100.0, 1.0, "%"))
+        grid.AddRow(*self._slider("Rotation", "rotation", 0.0, 360.0, 1.0, "deg"))
+        grid.AddRow(*self._slider("Seed", "seed", 0.0, 9999.0, 1.0, ""))
+        return self._expander("Grid", grid)
 
-        group = Eto.Forms.GroupBox()
-        group.Text = "Grid"
-        group.Content = grid
-        layout.AddRow(group)
-        layout.Add(None)
-        return layout
+    def _placeholder_section(self, title, message):
+        content = Eto.Forms.DynamicLayout()
+        content.Spacing = Eto.Drawing.Size(6, 4)
+        content.AddRow(Eto.Forms.Label(Text=message))
+        return self._expander(title, content)
 
-    def _slider(self, label, key, minimum, maximum, step):
+    def _expander(self, title, content):
+        expander = Eto.Forms.Expander()
+        expander.Header = Eto.Forms.Label(Text=title)
+        expander.Expanded = True
+        expander.Content = content
+        return expander
+
+    def _slider(self, label, key, minimum, maximum, step, unit):
         session = get_session()
         default = PARAM_DEFAULTS.get(key, minimum)
         control = LabeledSlider(
             label,
             minimum,
             maximum,
-            session.params.get(key, default),
             step,
+            session.params.get(key, default),
+            unit,
             on_change=lambda value, commit, key=key: self._param_changed(key, value, commit),
         )
         control.default = default
@@ -283,6 +359,21 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self._draft_dirty = False
         get_session().request_recompute(False)
 
+    def _mode_changed(self, sender, _event):
+        mode = PATTERN_MODES[sender.SelectedIndex]
+        session = get_session()
+        session.params["pattern_mode"] = mode
+        self._apply_mode_visibility(mode)
+        if session.targets:
+            session.request_recompute(False)
+
+    def _apply_mode_visibility(self, mode):
+        for name, section in self.mode_sections.items():
+            section.Visible = name == mode
+
+    def _preview_toggled(self, _sender, _event):
+        get_session().set_preview_enabled(bool(self.preview_checkbox.Checked))
+
     def _pick_targets(self, _sender, _event):
         from surfacepattern.core.session import pick_targets
 
@@ -299,9 +390,21 @@ class SurfacePatternPanel(Eto.Forms.Form):
                 self.placement_dropdown.SelectedIndex = PLACEMENT_OPTIONS.index(mode)
             session.request_recompute(False)
 
+    def _save_preset(self, _sender, _event):
+        Rhino.RhinoApp.WriteLine("SurfacePattern: preset save — next milestone.")
+
+    def _bake(self, _sender, _event):
+        Rhino.RhinoApp.WriteLine("SurfacePattern: bake — next milestone.")
+
+    # ---- lifetime -----------------------------------------------------------
+
+    def _on_shown(self, _sender, _event):
+        get_session().set_preview_enabled(bool(self.preview_checkbox.Checked))
+
     def _on_closed(self, _sender, _event):
         self._draft_timer.Stop()
         self._commit_timer.Stop()
+        get_session().set_preview_enabled(False)
         scriptcontext.sticky[PANEL_STICKY_KEY] = None
 
 
