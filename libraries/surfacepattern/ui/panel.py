@@ -258,7 +258,11 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.mode_segment.SelectedIndexChanged += eto_handler(self._mode_changed)
         layout.AddRow(self.mode_segment, None)
 
-        # (3) Per-mode parameter sections, collapsible.
+        # (3) Shared layout section (lattice parameters used by grid AND halftone),
+        # then per-mode parameter sections, all collapsible.
+        self.sliders = {}
+        self.layout_section = self._layout_section(session)
+        layout.AddRow(self.layout_section)
         self.mode_sections = {
             "grid": self._grid_section(session),
             "halftone": self._halftone_section(session),
@@ -294,27 +298,33 @@ class SurfacePatternPanel(Eto.Forms.Form):
         layout.AddRow(self.preset_dropdown, self.save_preset_button, self.bake_button)
         return layout
 
-    def _grid_section(self, session):
+    def _layout_section(self, session):
+        # Lattice parameters shared by the grid AND halftone engines (halftone builds
+        # on the grid lattice), so they stay visible and editable in both modes.
         self.shape_dropdown = self._dropdown(
             SHAPE_OPTIONS, session.params.get("shape", "circle"), "shape"
         )
         self.grid_type_dropdown = self._dropdown(
             GRID_TYPE_OPTIONS, session.params.get("grid_type", "square"), "grid_type"
         )
-        self.sliders = {}
+        content = Eto.Forms.DynamicLayout()
+        content.Spacing = Eto.Drawing.Size(6, 4)
+        content.AddRow(make_label("Shape"), self.shape_dropdown, None)
+        content.AddRow(*self._slider("Slot Ratio", "slot_ratio", 0.1, 1.0, 0.05, ""))
+        content.AddRow(*self._slider("Gap X", "spacing_x", 0.0, 100.0, 0.5, "mm"))
+        content.AddRow(*self._slider("Gap Y", "spacing_y", 0.0, 100.0, 0.5, "mm"))
+        content.AddRow(make_label("Grid Type"), self.grid_type_dropdown, None)
+        content.AddRow(*self._slider("Jitter Pos", "jitter_position", 0.0, 100.0, 1.0, "%"))
+        content.AddRow(*self._slider("Jitter Size", "jitter_size", 0.0, 100.0, 1.0, "%"))
+        content.AddRow(*self._slider("Jitter Rot", "jitter_rotation", 0.0, 100.0, 1.0, "%"))
+        content.AddRow(*self._slider("Rotation", "rotation", 0.0, 360.0, 1.0, "deg"))
+        content.AddRow(*self._slider("Seed", "seed", 0.0, 9999.0, 1.0, ""))
+        return self._expander("Layout", content)
+
+    def _grid_section(self, session):
         grid = Eto.Forms.DynamicLayout()
         grid.Spacing = Eto.Drawing.Size(6, 4)
-        grid.AddRow(make_label("Shape"), self.shape_dropdown, None)
         grid.AddRow(*self._slider("Size", "size", 0.5, 50.0, 0.1, "mm"))
-        grid.AddRow(*self._slider("Slot Ratio", "slot_ratio", 0.1, 1.0, 0.05, ""))
-        grid.AddRow(*self._slider("Gap X", "spacing_x", 0.0, 100.0, 0.5, "mm"))
-        grid.AddRow(*self._slider("Gap Y", "spacing_y", 0.0, 100.0, 0.5, "mm"))
-        grid.AddRow(make_label("Grid Type"), self.grid_type_dropdown, None)
-        grid.AddRow(*self._slider("Jitter Pos", "jitter_position", 0.0, 100.0, 1.0, "%"))
-        grid.AddRow(*self._slider("Jitter Size", "jitter_size", 0.0, 100.0, 1.0, "%"))
-        grid.AddRow(*self._slider("Jitter Rot", "jitter_rotation", 0.0, 100.0, 1.0, "%"))
-        grid.AddRow(*self._slider("Rotation", "rotation", 0.0, 360.0, 1.0, "deg"))
-        grid.AddRow(*self._slider("Seed", "seed", 0.0, 9999.0, 1.0, ""))
         return self._expander("Grid", grid)
 
     def _halftone_section(self, session):
@@ -456,6 +466,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
             self._recompute(False)
 
     def _apply_mode_visibility(self, mode):
+        # The shared lattice section applies to every lattice-based engine (not stamp).
+        self.layout_section.Visible = mode in ("grid", "halftone")
         for name, section in self.mode_sections.items():
             section.Visible = name == mode
 

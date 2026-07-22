@@ -1,4 +1,4 @@
-#! python3
+ #! python3
 # Main command: opens the SurfacePattern panel.
 
 from surfacepattern.ui import panel
