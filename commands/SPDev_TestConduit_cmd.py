@@ -4,9 +4,12 @@
 import math
 
 import Rhino
+import scriptcontext
 
 from surfacepattern.core import mapping, session
 from surfacepattern.preview import conduit
+
+STATE_KEY = "surfacepattern_testconduit_state"  # "off" | "draft" | "full"
 
 TARGET_DIVISIONS = 15   # grid cells along the larger face dimension
 HOLE_RATIO = 0.5        # hole diameter as a fraction of grid spacing
@@ -67,26 +70,51 @@ def build_preview(current):
 
 
 def main():
-    """Cycle the preview on re-run: off -> draft -> full -> off. Never writes to the document."""
+    """Cycle the preview on re-run: off -> draft -> full -> off. Never writes to the document.
+
+    The cycle state lives in scriptcontext.sticky as a plain string so it does not
+    depend on the conduit instance surviving between runs.
+    """
     current = session.get_session()
     preview = conduit.get_conduit()
+    state = scriptcontext.sticky.get(STATE_KEY, "off")
 
-    if not preview.Enabled:
+    # Diagnostics: if conduit# changes between runs, sticky is not persisting instances;
+    # if state stays "off" on every run, sticky is not persisting at all.
+    Rhino.RhinoApp.WriteLine(
+        "SPDev_TestConduit: [diag] state={}, conduit#{}, enabled={}, cached draft/full={}/{}".format(
+            state,
+            id(preview) % 100000,
+            preview.Enabled,
+            len(current.preview_draft_curves),
+            len(current.preview_curves),
+        )
+    )
+
+    # If the conduit instance was recreated between runs, re-enable the new one and
+    # keep cycling — the curve caches live in the session, not the conduit.
+    if state != "off" and not preview.Enabled:
+        Rhino.RhinoApp.WriteLine("SPDev_TestConduit: [diag] conduit was lost between runs, re-enabling.")
+        preview.enable()
+
+    if state == "off":
         if not session.pick_targets(current):
             Rhino.RhinoApp.WriteLine("SPDev_TestConduit: nothing selected.")
             return
         fallbacks = build_preview(current)
         current.preview_quality = "draft"
         preview.enable()
+        scriptcontext.sticky[STATE_KEY] = "draft"
         Rhino.RhinoApp.WriteLine(
             "SPDev_TestConduit: DRAFT preview on ({} polylines, {} full curves cached, "
             "{} pullback fallbacks). Run again for FULL.".format(
                 len(current.preview_draft_curves), len(current.preview_curves), fallbacks
             )
         )
-    elif current.preview_quality == "draft":
+    elif state == "draft":
         current.preview_quality = "full"
         preview.enable()  # already on; forces a redraw
+        scriptcontext.sticky[STATE_KEY] = "full"
         Rhino.RhinoApp.WriteLine(
             "SPDev_TestConduit: FULL preview ({} NURBS curves). Run again to turn off.".format(
                 len(current.preview_curves)
@@ -96,6 +124,7 @@ def main():
         preview.disable()
         current.clear_preview()
         current.preview_quality = "draft"
+        scriptcontext.sticky[STATE_KEY] = "off"
         Rhino.RhinoApp.WriteLine("SPDev_TestConduit: preview off.")
 
 

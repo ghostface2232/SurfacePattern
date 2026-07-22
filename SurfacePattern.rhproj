@@ -37,6 +37,24 @@
       },
       "title": "SurfacePattern_cmd",
       "uri": "commands/SurfacePattern_cmd.py"
+    },
+    {
+      "id": "c6b606b4-cc38-4c02-8ed0-30e07190b5c9",
+      "language": {
+        "id": "*.*.python",
+        "version": "3.*.*"
+      },
+      "title": "SPDev_TestConduit_cmd",
+      "uri": "commands/SPDev_TestConduit_cmd.py"
+    },
+    {
+      "id": "8a0ebd6e-cdd6-4a2c-bace-3bf94dd4dccf",
+      "language": {
+        "id": "*.*.python",
+        "version": "3.*.*"
+      },
+      "title": "SPDev_TestMapping_cmd",
+      "uri": "commands/SPDev_TestMapping_cmd.py"
     }
   ],
   "libraries": [
