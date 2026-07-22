@@ -7,13 +7,12 @@
 # window (Rhino.UI.RhinoEtoApp, per-document overload when available) so it never
 # falls behind Rhino.
 
-import traceback
-
 import Eto.Drawing
 import Eto.Forms
 import Rhino
 import scriptcontext
 
+from surfacepattern.core import errors
 from surfacepattern.core.session import get_session
 
 PANEL_STICKY_KEY = "surfacepattern_panel"
@@ -44,12 +43,22 @@ PARAM_DEFAULTS = {
 
 
 def eto_handler(func):
-    """Wrap an Eto event handler with try/except — Eto swallows handler exceptions silently."""
+    """Wrap an Eto event handler with try/except — Eto swallows handler exceptions silently.
+
+    Full tracebacks go to the shared log file (one-line command-line notice with the
+    path); the open panel, if any, shows a brief red error label.
+    """
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception:
-            Rhino.RhinoApp.WriteLine("SurfacePattern UI error:\n" + traceback.format_exc())
+            errors.log_error("ui:" + func.__name__)
+            panel = scriptcontext.sticky.get(PANEL_STICKY_KEY)
+            if panel is not None and hasattr(panel, "show_error"):
+                try:
+                    panel.show_error()
+                except Exception:
+                    pass
     return wrapper
 
 
@@ -243,6 +252,12 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.preview_checkbox.CheckedChanged += eto_handler(self._preview_toggled)
         layout.AddRow(self.preview_checkbox, None)
 
+        # Error status: brief red notice; details live in the log file.
+        self.error_label = Eto.Forms.Label()
+        self.error_label.Text = ""
+        self.error_label.TextColor = Eto.Drawing.Colors.Red
+        layout.AddRow(self.error_label, None)
+
         # (5) Fixed footer: preset dropdown + save (placeholders), bake button.
         # Destructive actions run only from these explicit clicks.
         self.preset_dropdown = Eto.Forms.DropDown()
@@ -323,6 +338,19 @@ class SurfacePatternPanel(Eto.Forms.Form):
 
     # ---- session wiring -----------------------------------------------------
 
+    def show_error(self):
+        """Show the brief red error notice (called by the handler decorator)."""
+        self.error_label.Text = "Pattern error — see command line for log path"
+
+    def clear_error(self):
+        """Hide the error notice after a successful recompute."""
+        self.error_label.Text = ""
+
+    def _recompute(self, draft):
+        """Recompute via the session and clear the error notice on success."""
+        get_session().request_recompute(draft)
+        self.clear_error()
+
     def _target_summary(self, session):
         if not session.targets:
             return "No targets — pick a surface"
@@ -339,7 +367,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
             self._draft_timer.Stop()
             self._commit_timer.Stop()
             self._draft_dirty = False
-            session.request_recompute(False)
+            self._recompute(False)
         else:
             self._draft_dirty = True
             self._draft_timer.Start()
@@ -349,7 +377,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
     def _draft_tick(self, _sender, _event):
         if self._draft_dirty:
             self._draft_dirty = False
-            get_session().request_recompute(True)
+            self._recompute(True)
         else:
             self._draft_timer.Stop()
 
@@ -357,7 +385,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self._commit_timer.Stop()
         self._draft_timer.Stop()
         self._draft_dirty = False
-        get_session().request_recompute(False)
+        self._recompute(False)
 
     def _mode_changed(self, sender, _event):
         mode = PATTERN_MODES[sender.SelectedIndex]
@@ -365,7 +393,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         session.params["pattern_mode"] = mode
         self._apply_mode_visibility(mode)
         if session.targets:
-            session.request_recompute(False)
+            self._recompute(False)
 
     def _apply_mode_visibility(self, mode):
         for name, section in self.mode_sections.items():
@@ -388,7 +416,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
             mode = session.params.get("placement_mode", "uv")
             if mode in PLACEMENT_OPTIONS:
                 self.placement_dropdown.SelectedIndex = PLACEMENT_OPTIONS.index(mode)
-            session.request_recompute(False)
+            self._recompute(False)
 
     def _save_preset(self, _sender, _event):
         Rhino.RhinoApp.WriteLine("SurfacePattern: preset save — next milestone.")
