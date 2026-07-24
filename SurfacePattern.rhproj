@@ -55,6 +55,15 @@
       },
       "title": "SPDev_TestMapping_cmd",
       "uri": "commands/SPDev_TestMapping_cmd.py"
+    },
+    {
+      "id": "ae88a632-eea5-4fdd-bb9b-6423a59002ae",
+      "language": {
+        "id": "*.*.python",
+        "version": "3.*.*"
+      },
+      "title": "SPDev_TestStamp_cmd",
+      "uri": "commands/SPDev_TestStamp_cmd.py"
     }
   ],
   "libraries": [

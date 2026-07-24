@@ -39,15 +39,18 @@ def generate(session):
 def _shape_extent(session):
     """Nominal shape footprint (x, y) in mm, used to convert gap spacing to center steps.
 
-    Halftone mode modulates sizes up to halftone_size_max, so that is the extent
-    guaranteeing the typed gap at the largest shapes. Rotation is ignored: the slot
-    footprint assumes rotation 0.
+    Halftone mode modulates sizes up to halftone_size_max and stamp mode scales its
+    unit-bounds stamps to stamp_size, so those are the extents guaranteeing the typed
+    gap at the largest shapes. Rotation is ignored: the slot footprint assumes rotation 0.
     """
-    if session.params.get("pattern_mode", "grid") == "halftone":
+    mode = session.params.get("pattern_mode", "grid")
+    if mode == "halftone":
         size = float(session.params.get("halftone_size_max", 6.0))
+    elif mode == "stamp":
+        size = float(session.params.get("stamp_size", 10.0))
     else:
         size = float(param(session, "size"))
-    if param(session, "shape") == "slot":
+    if mode != "stamp" and param(session, "shape") == "slot":
         return size, size * float(param(session, "slot_ratio"))
     return size, size
 

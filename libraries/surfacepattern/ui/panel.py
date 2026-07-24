@@ -25,6 +25,9 @@ SHAPE_OPTIONS = ["circle", "slot", "hex"]
 GRID_TYPE_OPTIONS = ["square", "staggered", "triangular"]
 PLACEMENT_OPTIONS = ["uv", "world"]
 HALFTONE_PROFILES = ["linear", "smooth", "gaussian"]
+STAMP_PLACE_MODES = ["array", "click", "freehand"]
+STAMP_PLACE_LABELS = ["Array", "Click Place", "Freehand"]
+STAMP_SELECT_OPTIONS = ["cycle", "random"]
 
 PARAM_DEFAULTS = {
     "pattern_mode": "grid",
@@ -46,6 +49,11 @@ PARAM_DEFAULTS = {
     "halftone_size_min": 1.0,
     "halftone_size_max": 6.0,
     "halftone_cull": 0.0,
+    "stamp_size": 10.0,
+    "stamp_rotation": 0.0,
+    "stamp_jitter": 0.0,
+    "stamp_select": "cycle",
+    "stamp_place_mode": "array",
 }
 
 
@@ -266,7 +274,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.mode_sections = {
             "grid": self._grid_section(session),
             "halftone": self._halftone_section(session),
-            "stamp": self._placeholder_section("Stamp", "Stamp parameters — next milestone."),
+            "stamp": self._stamp_section(session),
         }
         for mode in PATTERN_MODES:
             layout.AddRow(self.mode_sections[mode])
@@ -356,11 +364,51 @@ class SurfacePatternPanel(Eto.Forms.Form):
         halftone.AddRow(*self._slider("Cull Below", "halftone_cull", 0.0, 20.0, 0.1, "mm"))
         return self._expander("Halftone", halftone)
 
-    def _placeholder_section(self, title, message):
+    def _stamp_section(self, session):
+        self.stamp_button = Eto.Forms.Button()
+        self.stamp_button.Text = "Register Stamps"
+        self.stamp_button.Click += eto_handler(self._register_stamps)
+        self.stamp_label = Eto.Forms.Label()
+        self.stamp_label.Text = self._stamp_summary(session)
+
+        self.stamp_place_segment = Eto.Forms.RadioButtonList()
+        self.stamp_place_segment.Orientation = Eto.Forms.Orientation.Horizontal
+        self.stamp_place_segment.Spacing = Eto.Drawing.Size(8, 0)
+        for label in STAMP_PLACE_LABELS:
+            add_list_item(self.stamp_place_segment.Items, label)
+        current = session.params.get("stamp_place_mode", "array")
+        self.stamp_place_segment.SelectedIndex = (
+            STAMP_PLACE_MODES.index(current) if current in STAMP_PLACE_MODES else 0
+        )
+        self.stamp_place_segment.SelectedIndexChanged += eto_handler(
+            self._stamp_place_mode_changed
+        )
+
+        self.stamp_select_dropdown = self._dropdown(
+            STAMP_SELECT_OPTIONS, session.params.get("stamp_select", "cycle"), "stamp_select"
+        )
+
+        self.stamp_action_button = Eto.Forms.Button()
+        self.stamp_action_button.Click += eto_handler(self._stamp_action)
+
+        self.stamp_clear_button = Eto.Forms.Button()
+        self.stamp_clear_button.Text = "Clear Placed"
+        self.stamp_clear_button.Click += eto_handler(self._clear_stamp_placements)
+        self.stamp_placed_label = Eto.Forms.Label()
+        self.stamp_placed_label.Text = self._stamp_placed_summary(session)
+
         content = Eto.Forms.DynamicLayout()
         content.Spacing = Eto.Drawing.Size(6, 4)
-        content.AddRow(make_label(message))
-        return self._expander(title, content)
+        content.AddRow(self.stamp_button, self.stamp_label, None)
+        content.AddRow(self.stamp_place_segment, None)
+        content.AddRow(make_label("Multi-Stamp"), self.stamp_select_dropdown, None)
+        content.AddRow(*self._slider("Size", "stamp_size", 0.5, 200.0, 0.5, "mm"))
+        content.AddRow(*self._slider("Rotation", "stamp_rotation", 0.0, 360.0, 1.0, "deg"))
+        content.AddRow(*self._slider("Jitter", "stamp_jitter", 0.0, 100.0, 1.0, "%"))
+        content.AddRow(self.stamp_action_button, None)
+        content.AddRow(self.stamp_clear_button, self.stamp_placed_label, None)
+        self._update_stamp_action()
+        return self._expander("Stamp", content)
 
     def _expander(self, title, content):
         expander = Eto.Forms.Expander()
@@ -411,9 +459,10 @@ class SurfacePatternPanel(Eto.Forms.Form):
         """Recompute via the session; refresh labels and clear the error notice on success."""
         session = get_session()
         session.request_recompute(draft)
-        # Recompute prunes dead targets/attractors — keep the labels truthful.
+        # Recompute prunes dead targets/attractors/placements — keep the labels truthful.
         self.target_label.Text = self._target_summary(session)
         self.attractor_label.Text = self._attractor_summary(session)
+        self.stamp_placed_label.Text = self._stamp_placed_summary(session)
         self.clear_error()
 
     def _attractor_summary(self, session):
@@ -425,6 +474,24 @@ class SurfacePatternPanel(Eto.Forms.Form):
         if not session.targets:
             return "No targets — pick a surface"
         return "{} face(s)".format(len(session.targets))
+
+    def _stamp_summary(self, session):
+        if not session.stamps:
+            return "0 — pick closed planar curves"
+        return "{} stamp(s)".format(len(session.stamps))
+
+    def _stamp_placed_summary(self, session):
+        return "{} placed, {} stroke(s)".format(
+            len(session.manual_placements), len(session.freehand_strokes)
+        )
+
+    def _update_stamp_action(self):
+        place_mode = get_session().params.get("stamp_place_mode", "array")
+        self.stamp_action_button.Visible = place_mode in ("click", "freehand")
+        if place_mode == "click":
+            self.stamp_action_button.Text = "Place Stamps (click in viewport)"
+        elif place_mode == "freehand":
+            self.stamp_action_button.Text = "Draw Stroke"
 
     def _param_changed(self, key, value, commit):
         session = get_session()
@@ -466,8 +533,12 @@ class SurfacePatternPanel(Eto.Forms.Form):
             self._recompute(False)
 
     def _apply_mode_visibility(self, mode):
-        # The shared lattice section applies to every lattice-based engine (not stamp).
-        self.layout_section.Visible = mode in ("grid", "halftone")
+        # The shared lattice section drives every lattice-based layout: grid,
+        # halftone, and the stamp engine's array placement mode.
+        place_mode = get_session().params.get("stamp_place_mode", "array")
+        self.layout_section.Visible = mode in ("grid", "halftone") or (
+            mode == "stamp" and place_mode == "array"
+        )
         for name, section in self.mode_sections.items():
             section.Visible = name == mode
 
@@ -502,6 +573,51 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.attractor_label.Text = self._attractor_summary(session)
         if picked and session.targets:
             self._recompute(False)
+
+    def _register_stamps(self, _sender, _event):
+        from surfacepattern.core.session import pick_stamps
+
+        session = get_session()
+        self.Enabled = False  # lock panel input during viewport picking
+        try:
+            picked = pick_stamps(session)
+        finally:
+            self.Enabled = True
+        self.stamp_label.Text = self._stamp_summary(session)
+        if picked and session.targets:
+            self._recompute(False)
+
+    def _stamp_place_mode_changed(self, sender, _event):
+        session = get_session()
+        session.params["stamp_place_mode"] = STAMP_PLACE_MODES[sender.SelectedIndex]
+        self._update_stamp_action()
+        self._apply_mode_visibility(session.params.get("pattern_mode", "grid"))
+        if session.targets:
+            self._recompute(False)
+
+    def _stamp_action(self, _sender, _event):
+        from surfacepattern.core.session import stamp_click_place, stamp_draw_freehand
+
+        session = get_session()
+        place_mode = session.params.get("stamp_place_mode", "array")
+        self.Enabled = False  # lock panel input during viewport interaction
+        try:
+            if place_mode == "click":
+                stamp_click_place(session)
+            elif place_mode == "freehand":
+                stamp_draw_freehand(session)
+        finally:
+            self.Enabled = True
+        # The interactive loops recompute themselves; just keep the labels truthful.
+        self.stamp_placed_label.Text = self._stamp_placed_summary(session)
+        self.target_label.Text = self._target_summary(session)
+
+    def _clear_stamp_placements(self, _sender, _event):
+        from surfacepattern.core.session import clear_stamp_placements
+
+        session = get_session()
+        clear_stamp_placements(session)
+        self.stamp_placed_label.Text = self._stamp_placed_summary(session)
 
     def _save_preset(self, _sender, _event):
         Rhino.RhinoApp.WriteLine("SurfacePattern: preset save — next milestone.")

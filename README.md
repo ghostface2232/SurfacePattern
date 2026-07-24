@@ -16,6 +16,11 @@ patterns.
   - Falloff profiles: linear / smooth / gaussian, with invert
   - Works instantly with zero attractors (falls back to each face's UV center)
   - Culling of shapes below a minimum size
+- **Stamp engine** — user-registered closed planar curves as pattern units
+  - Registration normalizes copies to unit bounds, so the size slider scales them
+  - Array (grid lattice, cycle/random pick among multiple stamps), click-place with
+    a mouse-following ghost preview, and freehand strokes pulled onto the face
+  - Click-placed items are bulk-adjustable later via the Size/Rotation sliders
 - **Placement modes**
   - `uv` — laid out in the face's UV space with first-derivative distortion compensation,
     so mm spacing holds on curved faces (default for a single face)
@@ -38,7 +43,7 @@ patterns.
 2. Run `commands/SurfacePattern_cmd.py` to open the panel.
 3. In the panel:
    1. **Pick Targets** — select the target surfaces/polysurfaces
-   2. Choose a mode — **Grid / Halftone / Stamp** (planned)
+   2. Choose a mode — **Grid / Halftone / Stamp**
    3. **Layout** section — shape, gaps, grid type, jitter, and other lattice
       parameters shared by Grid and Halftone
    4. For Halftone, **Pick Attractors** (points/curves), then tune Radius and
@@ -52,6 +57,7 @@ Development commands (visual checks only, not published):
 | --- | --- |
 | `SPDev_TestMapping_cmd` | Validates the mapping core — adds a perforation grid of circles sized to each face |
 | `SPDev_TestConduit_cmd` | Validates the preview conduit — each run cycles off → draft → full |
+| `SPDev_TestStamp_cmd` | Validates the stamp engine — registers star/circle test stamps, rejects a non-planar curve, previews a cycled array |
 
 ## Repository layout
 
@@ -70,7 +76,7 @@ libraries/surfacepattern/        The plugin package
     grid.py                      Regular lattice placement generation (parameter space only)
     halftone.py                  Attractor-distance size modulation
     shapes.py                    Unit shapes (NURBS + draft polyline)
-    stamp.py                     (planned)
+    stamp.py                     Custom stamps: registration/normalization, array, click-place, freehand
   preview/
     conduit.py                   DisplayConduit two-tier rendering (draft/full)
   ui/
@@ -100,6 +106,6 @@ libraries/surfacepattern/        The plugin package
 | Grid engine + panel wiring | ✅ |
 | Eto panel (sliders, sections, debounce) | ✅ |
 | Halftone engine | ✅ |
-| Stamp engine | ⏳ planned |
+| Stamp engine (array / click-place / freehand) | ✅ |
 | Preset save/load | ⏳ planned |
 | Bake (commit to document) | ⏳ planned |

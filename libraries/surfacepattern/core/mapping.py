@@ -119,6 +119,21 @@ def plane_grid_extent(face_records, plane):
     return min(s_values), max(s_values), min(t_values), max(t_values)
 
 
+def _closest_on_face(resolved, point):
+    """Closest trimmed-region hit over (record, face) pairs: (distance, record, su, sv) or None."""
+    best = None
+    for record, face in resolved:
+        ok, su, sv = face.ClosestPoint(point)
+        if not ok:
+            continue
+        if face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
+            continue
+        distance = point.DistanceTo(record.surface.PointAt(su, sv))
+        if best is None or distance < best[0]:
+            best = (distance, record, su, sv)
+    return best
+
+
 def project_plane_points(face_records, plane, points, max_distance=None):
     """Project plane-space (s, t) points onto the closest face.
 
@@ -138,17 +153,7 @@ def project_plane_points(face_records, plane, points, max_distance=None):
 
     results = []
     for s, t in points:
-        grid_point = plane.PointAt(s, t)
-        best = None
-        for record, face in resolved:
-            ok, su, sv = face.ClosestPoint(grid_point)
-            if not ok:
-                continue
-            if face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
-                continue
-            distance = grid_point.DistanceTo(record.surface.PointAt(su, sv))
-            if best is None or distance < best[0]:
-                best = (distance, record, su, sv)
+        best = _closest_on_face(resolved, plane.PointAt(s, t))
         if best is not None and best[0] <= max_distance:
             _distance, record, su, sv = best
             u, v = _normalize(record, su, sv)
@@ -156,6 +161,23 @@ def project_plane_points(face_records, plane, points, max_distance=None):
         else:
             results.append(None)
     return results
+
+
+def closest_face_uv(face_records, point, max_distance=None):
+    """Closest on-face hit to a 3D point: (face_record, u, v) normalized; None when out of range."""
+    resolved, bbox = _resolve_with_bbox(face_records)
+    if not resolved or not bbox.IsValid:
+        return None
+    if max_distance is None:
+        max_distance = max(
+            bbox.Diagonal.Length * 0.5, scriptcontext.doc.ModelAbsoluteTolerance
+        )
+    best = _closest_on_face(resolved, point)
+    if best is None or best[0] > max_distance:
+        return None
+    _distance, record, su, sv = best
+    u, v = _normalize(record, su, sv)
+    return record, u, v
 
 
 def world_grid_projection(face_records, spacing, plane, max_distance=None):
@@ -195,6 +217,23 @@ def place_unit_curve_flat(face_record, u, v, unit_curve, size, rotation):
     return curve
 
 
+def pull_curve_to_face(face_record, curve):
+    """Pull a 3D curve onto the face; (curve, pulled) with the input kept when pullback fails."""
+    face = face_record.resolve_face()
+    if face is None:
+        return curve, False
+    tolerance = scriptcontext.doc.ModelAbsoluteTolerance
+    pulled = curve.PullToBrepFace(face, tolerance)
+    if pulled is None or len(pulled) == 0:
+        return curve, False
+    if len(pulled) == 1:
+        return pulled[0], True
+    joined = Rhino.Geometry.Curve.JoinCurves(pulled, tolerance)
+    if joined is not None and len(joined) > 0:
+        return joined[0], True
+    return pulled[0], True
+
+
 def place_unit_curve(face_record, u, v, unit_curve, size, rotation):
     """Orient a unit curve (XY plane, origin-centered) onto the face at normalized (u, v).
 
@@ -206,16 +245,4 @@ def place_unit_curve(face_record, u, v, unit_curve, size, rotation):
     curve = place_unit_curve_flat(face_record, u, v, unit_curve, size, rotation)
     if curve is None:
         return None, False
-
-    face = face_record.resolve_face()
-    if face is not None:
-        tolerance = scriptcontext.doc.ModelAbsoluteTolerance
-        pulled = curve.PullToBrepFace(face, tolerance)
-        if pulled is not None and len(pulled) > 0:
-            if len(pulled) == 1:
-                return pulled[0], True
-            joined = Rhino.Geometry.Curve.JoinCurves(pulled, tolerance)
-            if joined is not None and len(joined) > 0:
-                return joined[0], True
-            return pulled[0], True
-    return curve, False
+    return pull_curve_to_face(face_record, curve)

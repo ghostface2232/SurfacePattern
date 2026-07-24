@@ -38,6 +38,9 @@ class PatternSession:
     targets: list = field(default_factory=list)      # list of FaceRecord
     attractors: list = field(default_factory=list)   # document object ids (points/curves)
     params: dict = field(default_factory=dict)       # current pattern parameters
+    stamps: list = field(default_factory=list)       # normalized (nurbs, draft) unit curve pairs
+    manual_placements: list = field(default_factory=list)  # (FaceRecord, u, v, size_factor, rotation_offset, stamp_index)
+    freehand_strokes: list = field(default_factory=list)   # independent pulled curves shown in stamp previews
     preview_curves: list = field(default_factory=list)        # full NURBS curves
     preview_draft_curves: list = field(default_factory=list)  # polyline approximations
     preview_quality: str = "draft"                   # "draft" | "full"
@@ -99,7 +102,7 @@ class PatternSession:
         """Run the active pattern engine and rebuild the preview cache (draft skips pullback)."""
         # Local imports keep module load order safe (preview.conduit imports this module).
         from surfacepattern.core import mapping
-        from surfacepattern.engine import grid, halftone, shapes
+        from surfacepattern.engine import grid, halftone, shapes, stamp
         from surfacepattern.preview.conduit import get_conduit
 
         self.preview_quality = "draft" if draft else "full"
@@ -109,32 +112,47 @@ class PatternSession:
             scriptcontext.doc.Views.Redraw()
             return
 
-        engines = {"grid": grid, "halftone": halftone}
-        engine = engines.get(self.params.get("pattern_mode", "grid"))
-        if engine is None:
-            return
-        placements = engine.generate(self)
+        # Placement jobs: (record, u, v, size, rotation, nurbs_unit, draft_unit).
+        # Grid/halftone share one unit shape; stamp placements each carry a stamp index.
+        mode = self.params.get("pattern_mode", "grid")
+        extra_curves = []
+        if mode == "stamp":
+            jobs = []
+            for record, u, v, size, rotation, index in stamp.generate(self):
+                nurbs_unit, draft_unit = self.stamps[index % len(self.stamps)]
+                jobs.append((record, u, v, size, rotation, nurbs_unit, draft_unit))
+            # Freehand strokes are already pulled, document-independent curves.
+            extra_curves = list(self.freehand_strokes)
+        else:
+            engines = {"grid": grid, "halftone": halftone}
+            engine = engines.get(mode)
+            if engine is None:
+                return
+            nurbs_unit, draft_unit = shapes.unit_shape(
+                self.params.get("shape", "circle"), self.params.get("slot_ratio", 0.4)
+            )
+            jobs = [
+                (record, u, v, size, rotation, nurbs_unit, draft_unit)
+                for record, u, v, size, rotation in engine.generate(self)
+            ]
 
-        nurbs_unit, draft_unit = shapes.unit_shape(
-            self.params.get("shape", "circle"), self.params.get("slot_ratio", 0.4)
-        )
         if draft:
             curves = []
-            for record, u, v, size, rotation in placements:
+            for record, u, v, size, rotation, _nurbs_unit, draft_unit in jobs:
                 curve = mapping.place_unit_curve_flat(record, u, v, draft_unit, size, rotation)
                 if curve is not None:
                     curves.append(curve)
-            self.preview_draft_curves = curves
+            self.preview_draft_curves = curves + extra_curves
         else:
             self.pullback_failures = 0
             curves = []
-            for record, u, v, size, rotation in placements:
+            for record, u, v, size, rotation, nurbs_unit, _draft_unit in jobs:
                 curve, pulled = mapping.place_unit_curve(record, u, v, nurbs_unit, size, rotation)
                 if curve is not None:
                     curves.append(curve)
                     if not pulled:
                         self.pullback_failures += 1
-            self.preview_curves = curves
+            self.preview_curves = curves + extra_curves
             if self.pullback_failures:
                 Rhino.RhinoApp.WriteLine(
                     "SurfacePattern: {} curves failed pullback (planar fallback used).".format(
@@ -150,7 +168,15 @@ def get_session():
     # Name-based check keeps the session alive across ScriptEditor module reloads,
     # where the class object identity changes and isinstance() would fail.
     if existing is not None and type(existing).__name__ == "PatternSession":
-        return existing
+        if type(existing) is PatternSession:
+            return existing
+        # Instance from before a module reload: rebind its state onto the current
+        # class so fields and methods added since (e.g. stamp state) exist.
+        migrated = PatternSession()
+        for name in migrated.__dataclass_fields__:
+            setattr(migrated, name, getattr(existing, name, getattr(migrated, name)))
+        scriptcontext.sticky[STICKY_KEY] = migrated
+        return migrated
     fresh = PatternSession()
     scriptcontext.sticky[STICKY_KEY] = fresh
     return fresh
@@ -226,3 +252,41 @@ def pick_attractors(session=None):
 
     session.attractors = [objref.ObjectId for objref in getter.Objects()]
     return True
+
+
+# Stamp entry points: thin wrappers so the ui layer keeps talking only to the
+# session while the interactive logic lives with the stamp engine.
+
+
+def pick_stamps(session=None):
+    """Interactively register closed planar curves as stamps; True on success."""
+    from surfacepattern.engine import stamp
+
+    session = session if session is not None else get_session()
+    return stamp.register_stamps(session)
+
+
+def stamp_click_place(session=None):
+    """Run the stamp click-to-place loop; returns the number of stamps placed."""
+    from surfacepattern.engine import stamp
+
+    session = session if session is not None else get_session()
+    return stamp.click_place(session)
+
+
+def stamp_draw_freehand(session=None):
+    """Run the freehand stroke loop; True when a stroke was added."""
+    from surfacepattern.engine import stamp
+
+    session = session if session is not None else get_session()
+    return stamp.draw_freehand(session)
+
+
+def clear_stamp_placements(session=None):
+    """Drop all manual stamp placements and freehand strokes; returns how many were removed."""
+    session = session if session is not None else get_session()
+    removed = len(session.manual_placements) + len(session.freehand_strokes)
+    session.manual_placements = []
+    session.freehand_strokes = []
+    session.request_recompute(False)
+    return removed
