@@ -42,6 +42,7 @@ class PatternSession:
     manual_placements: list = field(default_factory=list)  # (FaceRecord, u, v, size_factor, rotation_offset, stamp_index)
     freehand_strokes: list = field(default_factory=list)   # independent pulled curves shown in stamp previews
     preview_curves: list = field(default_factory=list)        # full NURBS curves
+    preview_records: list = field(default_factory=list)       # FaceRecord per full curve (None for strokes)
     preview_draft_curves: list = field(default_factory=list)  # polyline approximations
     preview_quality: str = "draft"                   # "draft" | "full"
     pullback_failures: int = 0                       # curves that fell back to planar on last full recompute
@@ -81,6 +82,7 @@ class PatternSession:
     def clear_preview(self):
         """Empty both preview curve caches."""
         self.preview_curves = []
+        self.preview_records = []
         self.preview_draft_curves = []
 
     def set_preview(self, curves, draft_curves):
@@ -146,13 +148,16 @@ class PatternSession:
         else:
             self.pullback_failures = 0
             curves = []
+            curve_records = []  # face association per curve, so bake/trim can group by face
             for record, u, v, size, rotation, nurbs_unit, _draft_unit in jobs:
                 curve, pulled = mapping.place_unit_curve(record, u, v, nurbs_unit, size, rotation)
                 if curve is not None:
                     curves.append(curve)
+                    curve_records.append(record)
                     if not pulled:
                         self.pullback_failures += 1
             self.preview_curves = curves + extra_curves
+            self.preview_records = curve_records + [None] * len(extra_curves)
             if self.pullback_failures:
                 Rhino.RhinoApp.WriteLine(
                     "SurfacePattern: {} curves failed pullback (planar fallback used).".format(
@@ -290,3 +295,23 @@ def clear_stamp_placements(session=None):
     session.freehand_strokes = []
     session.request_recompute(False)
     return removed
+
+
+# Bake entry points: thin wrappers so the ui layer keeps talking only to the
+# session while core.bake stays the sole document writer.
+
+
+def bake_curves(session=None):
+    """Bake the full preview curves to the document; returns the number added."""
+    from surfacepattern.core import bake
+
+    session = session if session is not None else get_session()
+    return bake.bake_curves(session)
+
+
+def bake_with_trim(session=None):
+    """Bake curves then trim the target faces; returns the number of holes cut."""
+    from surfacepattern.core import bake
+
+    session = session if session is not None else get_session()
+    return bake.bake_with_trim(session)

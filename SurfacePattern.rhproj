@@ -64,6 +64,15 @@
       },
       "title": "SPDev_TestStamp_cmd",
       "uri": "commands/SPDev_TestStamp_cmd.py"
+    },
+    {
+      "id": "3cd68058-7095-4441-86e1-3bc85316de35",
+      "language": {
+        "id": "*.*.python",
+        "version": "3.*.*"
+      },
+      "title": "SPDev_TestBake_cmd",
+      "uri": "commands/SPDev_TestBake_cmd.py"
     }
   ],
   "libraries": [

@@ -29,6 +29,15 @@ patterns.
 - **Live preview** — DisplayConduit based, never writes to the document
   - While dragging: polyline approximations (draft, capped at 1500 shown);
     on release: NURBS curves pulled onto the surface (full)
+- **Bake** — commits preview curves to per-operation sublayers under a
+  SurfacePattern parent layer, with the generating parameters embedded as a JSON
+  UserString; one undo record per bake
+  - **Curves + Trim** perforates the target faces (split → drop hole interiors →
+    join), optionally preserving the original on a hidden layer; StatusBar
+    progress, Esc cancel with full undo rollback, failed curves left selected
+- **Presets** — pattern parameters saved/loaded as JSON in the user roaming
+  folder (`SurfacePattern/presets/`); three built-ins ship in code
+  (Uniform Perforation / Center Fade Grille / Hex Mesh)
 - **Error UX** — full tracebacks go to `~/.surfacepattern/log.txt`; the panel shows
   a one-line red notice
 
@@ -48,8 +57,8 @@ patterns.
       parameters shared by Grid and Halftone
    4. For Halftone, **Pick Attractors** (points/curves), then tune Radius and
       Size Min/Max
-   5. Check the orange preview in the viewport → **Bake** (planned) to commit
-      curves to the document
+   5. Check the orange preview in the viewport → **Bake** (Curves Only, or
+      Curves + Trim to perforate the surface) to commit to the document
 
 Development commands (visual checks only, not published):
 
@@ -58,6 +67,7 @@ Development commands (visual checks only, not published):
 | `SPDev_TestMapping_cmd` | Validates the mapping core — adds a perforation grid of circles sized to each face |
 | `SPDev_TestConduit_cmd` | Validates the preview conduit — each run cycles off → draft → full |
 | `SPDev_TestStamp_cmd` | Validates the stamp engine — registers star/circle test stamps, rejects a non-planar curve, previews a cycled array |
+| `SPDev_TestBake_cmd` | Validates the bake + trim pipeline — bakes and trims a coarse circle grid, reports UserString traceability (one undo restores) |
 
 ## Repository layout
 
@@ -71,7 +81,7 @@ libraries/surfacepattern/        The plugin package
     session.py                   Session singleton (sticky), target/attractor picking, recompute orchestration
     mapping.py                   UV↔3D mapping, distortion compensation, world projection, curve placement/pullback (owns all surface evaluation)
     errors.py                    File logging + command-line notice
-    bake.py                      Sole document writer (planned)
+    bake.py                      Sole document writer: curve bake + trim pipeline
   engine/
     grid.py                      Regular lattice placement generation (parameter space only)
     halftone.py                  Attractor-distance size modulation
@@ -82,7 +92,7 @@ libraries/surfacepattern/        The plugin package
   ui/
     panel.py                     Eto panel (modeless Form)
   io/
-    presets.py                   Preset save/load (planned)
+    presets.py                   JSON preset save/load (roaming folder + built-ins)
 ```
 
 ## Architecture principles (AGENTS.md summary)
@@ -107,5 +117,5 @@ libraries/surfacepattern/        The plugin package
 | Eto panel (sliders, sections, debounce) | ✅ |
 | Halftone engine | ✅ |
 | Stamp engine (array / click-place / freehand) | ✅ |
-| Preset save/load | ⏳ planned |
-| Bake (commit to document) | ⏳ planned |
+| Preset save/load | ✅ |
+| Bake (curves / curves + trim) | ✅ |

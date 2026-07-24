@@ -28,6 +28,8 @@ HALFTONE_PROFILES = ["linear", "smooth", "gaussian"]
 STAMP_PLACE_MODES = ["array", "click", "freehand"]
 STAMP_PLACE_LABELS = ["Array", "Click Place", "Freehand"]
 STAMP_SELECT_OPTIONS = ["cycle", "random"]
+BAKE_MODES = ["curves", "trim"]
+BAKE_MODE_LABELS = ["Curves Only", "Curves + Trim"]
 
 PARAM_DEFAULTS = {
     "pattern_mode": "grid",
@@ -54,6 +56,8 @@ PARAM_DEFAULTS = {
     "stamp_jitter": 0.0,
     "stamp_select": "cycle",
     "stamp_place_mode": "array",
+    "bake_mode": "curves",
+    "bake_keep_original": True,
 }
 
 
@@ -140,6 +144,14 @@ class LabeledSlider:
     def value(self):
         return self.slider.Value / self._scale
 
+    def set_value_silent(self, number):
+        """Set the control to a clamped value without firing on_change (preset load)."""
+        clamped = min(max(number, self.minimum), self.maximum)
+        self._updating = True
+        self.slider.Value = int(round(clamped * self._scale))
+        self.textbox.Text = self._format(self.value)
+        self._updating = False
+
     def row(self):
         field = Eto.Forms.StackLayout()
         field.Orientation = Eto.Forms.Orientation.Horizontal
@@ -222,6 +234,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         for key, value in PARAM_DEFAULTS.items():
             session.params.setdefault(key, value)
 
+        self._loading_preset = False  # suppresses recompute storms while applying a preset
         self._draft_dirty = False
         self._draft_timer = Eto.Forms.UITimer()
         self._draft_timer.Interval = DRAFT_INTERVAL
@@ -292,18 +305,35 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.error_label.TextColor = Eto.Drawing.Colors.Red
         layout.AddRow(self.error_label, None)
 
-        # (5) Fixed footer: preset dropdown + save (placeholders), bake button.
+        # (5) Fixed footer: preset dropdown + save, bake mode + keep-original + bake.
         # Destructive actions run only from these explicit clicks.
         self.preset_dropdown = Eto.Forms.DropDown()
-        add_list_item(self.preset_dropdown.Items, "(default)")
-        self.preset_dropdown.SelectedIndex = 0
+        self._preset_names = []
+        self._refresh_preset_dropdown()
+        self.preset_dropdown.SelectedIndexChanged += eto_handler(self._preset_selected)
         self.save_preset_button = Eto.Forms.Button()
         self.save_preset_button.Text = "Save"
         self.save_preset_button.Click += eto_handler(self._save_preset)
+
+        self.bake_mode_dropdown = Eto.Forms.DropDown()
+        for label in BAKE_MODE_LABELS:
+            add_list_item(self.bake_mode_dropdown.Items, label)
+        current_bake = session.params.get("bake_mode", "curves")
+        self.bake_mode_dropdown.SelectedIndex = (
+            BAKE_MODES.index(current_bake) if current_bake in BAKE_MODES else 0
+        )
+        self.bake_mode_dropdown.SelectedIndexChanged += eto_handler(self._bake_mode_changed)
+        self.keep_original_checkbox = Eto.Forms.CheckBox()
+        self.keep_original_checkbox.Text = "Keep original copy"
+        self.keep_original_checkbox.Checked = bool(session.params.get("bake_keep_original", True))
+        self.keep_original_checkbox.Visible = current_bake == "trim"
+        self.keep_original_checkbox.CheckedChanged += eto_handler(self._keep_original_changed)
         self.bake_button = Eto.Forms.Button()
         self.bake_button.Text = "Bake"
         self.bake_button.Click += eto_handler(self._bake)
-        layout.AddRow(self.preset_dropdown, self.save_preset_button, self.bake_button)
+
+        layout.AddRow(self.preset_dropdown, self.save_preset_button, None)
+        layout.AddRow(self.bake_mode_dropdown, self.keep_original_checkbox, self.bake_button)
         return layout
 
     def _layout_section(self, session):
@@ -494,6 +524,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
             self.stamp_action_button.Text = "Draw Stroke"
 
     def _param_changed(self, key, value, commit):
+        if self._loading_preset:
+            return
         session = get_session()
         if key == "seed":
             value = int(value)
@@ -525,6 +557,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self._recompute(False)
 
     def _mode_changed(self, sender, _event):
+        if self._loading_preset:
+            return
         mode = PATTERN_MODES[sender.SelectedIndex]
         session = get_session()
         session.params["pattern_mode"] = mode
@@ -588,6 +622,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
             self._recompute(False)
 
     def _stamp_place_mode_changed(self, sender, _event):
+        if self._loading_preset:
+            return
         session = get_session()
         session.params["stamp_place_mode"] = STAMP_PLACE_MODES[sender.SelectedIndex]
         self._update_stamp_action()
@@ -619,11 +655,160 @@ class SurfacePatternPanel(Eto.Forms.Form):
         clear_stamp_placements(session)
         self.stamp_placed_label.Text = self._stamp_placed_summary(session)
 
+    # ---- presets ------------------------------------------------------------
+
+    def _refresh_preset_dropdown(self, select_name=None):
+        """Rescan the preset folder into the dropdown; optionally select a name."""
+        from surfacepattern.io import presets
+
+        self._preset_names = presets.list_presets()
+        index = 0
+        if select_name in self._preset_names:
+            index = self._preset_names.index(select_name) + 1
+        self._loading_preset = True  # rebuilding items fires selection events
+        try:
+            self.preset_dropdown.Items.Clear()
+            add_list_item(self.preset_dropdown.Items, "(presets)")
+            for name in self._preset_names:
+                add_list_item(self.preset_dropdown.Items, name)
+            self.preset_dropdown.SelectedIndex = index
+        finally:
+            self._loading_preset = False
+
+    def _preset_selected(self, _sender, _event):
+        from surfacepattern.io import presets
+
+        index = self.preset_dropdown.SelectedIndex
+        if self._loading_preset or index <= 0:
+            return
+        name = self._preset_names[index - 1]
+        loaded = presets.load_preset(name)
+        if loaded is None:
+            Rhino.RhinoApp.WriteLine("SurfacePattern: preset '{}' could not be read.".format(name))
+            return
+        session = get_session()
+        session.params.update(loaded)
+        self._apply_params_to_controls(session)
+        if session.targets:
+            self._recompute(False)
+
     def _save_preset(self, _sender, _event):
-        Rhino.RhinoApp.WriteLine("SurfacePattern: preset save — next milestone.")
+        import os
+
+        from surfacepattern.io import presets
+
+        name = self._prompt_preset_name()
+        if not name:
+            return
+        path = presets.save_preset(name, get_session().params)
+        saved_name = os.path.splitext(os.path.basename(path))[0]
+        self._refresh_preset_dropdown(select_name=saved_name)
+        Rhino.RhinoApp.WriteLine("SurfacePattern: preset saved — {}".format(path))
+
+    def _prompt_preset_name(self):
+        """Modal name-entry dialog; empty string when cancelled."""
+        result = {"name": ""}
+        dialog = Eto.Forms.Dialog()
+        dialog.Title = "Save Preset"
+        dialog.Padding = Eto.Drawing.Padding(10)
+        textbox = Eto.Forms.TextBox()
+        textbox.Width = 180
+        ok_button = Eto.Forms.Button()
+        ok_button.Text = "Save"
+        cancel_button = Eto.Forms.Button()
+        cancel_button.Text = "Cancel"
+
+        def _confirm(_sender, _event):
+            result["name"] = (textbox.Text or "").strip()
+            dialog.Close()
+
+        ok_button.Click += eto_handler(_confirm)
+        cancel_button.Click += eto_handler(lambda _sender, _event: dialog.Close())
+        content = Eto.Forms.DynamicLayout()
+        content.Spacing = Eto.Drawing.Size(6, 6)
+        content.AddRow(make_label("Preset name"), textbox)
+        content.AddRow(None, ok_button, cancel_button)
+        dialog.Content = content
+        dialog.DefaultButton = ok_button
+        dialog.AbortButton = cancel_button
+        dialog.ShowModal(self)
+        return result["name"]
+
+    def _select_option(self, dropdown, options, value):
+        """Point a dropdown at a value (first option when unknown)."""
+        dropdown.SelectedIndex = options.index(value) if value in options else 0
+
+    def _apply_params_to_controls(self, session):
+        """Push session.params into every control without firing recomputes."""
+        self._loading_preset = True
+        try:
+            for key, slider in self.sliders.items():
+                if key in session.params:
+                    try:
+                        slider.set_value_silent(float(session.params[key]))
+                    except (TypeError, ValueError):
+                        pass
+            self._select_option(
+                self.placement_dropdown, PLACEMENT_OPTIONS, session.params.get("placement_mode")
+            )
+            self._select_option(self.shape_dropdown, SHAPE_OPTIONS, session.params.get("shape"))
+            self._select_option(
+                self.grid_type_dropdown, GRID_TYPE_OPTIONS, session.params.get("grid_type")
+            )
+            self._select_option(
+                self.profile_dropdown, HALFTONE_PROFILES, session.params.get("halftone_profile")
+            )
+            self._select_option(
+                self.stamp_select_dropdown, STAMP_SELECT_OPTIONS, session.params.get("stamp_select")
+            )
+            self._select_option(self.bake_mode_dropdown, BAKE_MODES, session.params.get("bake_mode"))
+            self.invert_checkbox.Checked = bool(session.params.get("halftone_invert", False))
+            self.keep_original_checkbox.Checked = bool(
+                session.params.get("bake_keep_original", True)
+            )
+            mode = session.params.get("pattern_mode", "grid")
+            self.mode_segment.SelectedIndex = (
+                PATTERN_MODES.index(mode) if mode in PATTERN_MODES else 0
+            )
+            place_mode = session.params.get("stamp_place_mode", "array")
+            self.stamp_place_segment.SelectedIndex = (
+                STAMP_PLACE_MODES.index(place_mode) if place_mode in STAMP_PLACE_MODES else 0
+            )
+        finally:
+            self._loading_preset = False
+        self.keep_original_checkbox.Visible = session.params.get("bake_mode", "curves") == "trim"
+        self._update_stamp_action()
+        self._apply_mode_visibility(session.params.get("pattern_mode", "grid"))
+
+    # ---- bake ---------------------------------------------------------------
+
+    def _bake_mode_changed(self, sender, _event):
+        mode = BAKE_MODES[sender.SelectedIndex]
+        get_session().params["bake_mode"] = mode
+        self.keep_original_checkbox.Visible = mode == "trim"
+
+    def _keep_original_changed(self, _sender, _event):
+        get_session().params["bake_keep_original"] = bool(self.keep_original_checkbox.Checked)
 
     def _bake(self, _sender, _event):
-        Rhino.RhinoApp.WriteLine("SurfacePattern: bake — next milestone.")
+        from surfacepattern.core.session import bake_curves, bake_with_trim
+
+        session = get_session()
+        if not session.targets:
+            Rhino.RhinoApp.WriteLine("SurfacePattern: pick targets before baking.")
+            return
+        trim = session.params.get("bake_mode", "curves") == "trim"
+        self.Enabled = False  # lock panel input during the heavy bake path
+        try:
+            if trim:
+                bake_with_trim(session)
+            else:
+                bake_curves(session)
+        finally:
+            self.Enabled = True
+        # Trim replaces source objects — keep the labels truthful afterwards.
+        self.target_label.Text = self._target_summary(session)
+        self.stamp_placed_label.Text = self._stamp_placed_summary(session)
 
     # ---- lifetime -----------------------------------------------------------
 
