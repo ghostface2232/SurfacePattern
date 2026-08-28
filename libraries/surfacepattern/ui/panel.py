@@ -166,14 +166,6 @@ class LabeledSlider:
         self.textbox.Text = self._format(self.value)
         self._updating = False
 
-    def set_enabled(self, enabled):
-        """Enable or disable the complete labeled-slider row."""
-        enabled = bool(enabled)
-        self.label.Enabled = enabled
-        self.slider.Enabled = enabled
-        self.textbox.Enabled = enabled
-        self.unit_label.Enabled = enabled
-
     def row(self):
         field = Eto.Forms.StackLayout()
         field.Orientation = Eto.Forms.Orientation.Horizontal
@@ -659,14 +651,9 @@ class SurfacePatternPanel(Eto.Forms.Form):
             section.Visible = name == mode
 
     def _update_placement_controls(self, placement_mode):
-        """Reflect which lattice controls apply to the selected placement mode."""
-        is_uv = placement_mode == "uv"
-        self.grid_type_dropdown.Enabled = is_uv
-        self.sliders["spacing_y"].set_enabled(is_uv)
-        self.sliders["jitter_position"].set_enabled(is_uv)
-        self.sliders["spacing_x"].label.Text = "Gap X" if is_uv else "Gap"
+        """Explain how the selected placement mode treats the shared grid controls."""
         self.placement_hint.Text = (
-            "" if is_uv else "Uniform: adaptive rows, one isotropic Gap"
+            "" if placement_mode == "uv" else "Uniform: fixed projected grid, clipped at boundaries"
         )
 
     def _preview_toggled(self, _sender, _event):

@@ -24,8 +24,9 @@ patterns.
 - **Placement modes**
   - `uv` — laid out in the face's UV space with lightweight first-derivative compensation
     (fast; default for a single face)
-  - `surface` — isotropic, area-weighted Poisson-like placement in 3D model space;
-    points are inserted or removed as surface area expands or contracts (default for multiple faces)
+  - `surface` — a fixed square/staggered/triangular lattice built on a reference plane
+    and directionally projected to the surface; trim boundaries clip cells without
+    stretching row or column spacing (default for multiple faces)
 - **Live preview** — DisplayConduit based, never writes to the document
   - While dragging: polyline approximations (draft, capped at 1500 shown);
     on release: NURBS curves pulled onto the surface (full)
@@ -79,7 +80,7 @@ commands/                        Rhino command entry points
 libraries/surfacepattern/        The plugin package
   core/
     session.py                   Session singleton (sticky), target/attractor picking, recompute orchestration
-    mapping.py                   UV↔3D mapping, surface metrics, distortion compensation, curve placement/pullback (owns all surface evaluation)
+    mapping.py                   UV↔3D mapping, projected grids, distortion compensation, curve placement/pullback (owns all surface evaluation)
     errors.py                    File logging + command-line notice
     bake.py                      Sole document writer: curve bake + trim pipeline
   engine/

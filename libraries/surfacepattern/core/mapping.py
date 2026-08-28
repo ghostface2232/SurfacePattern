@@ -1,5 +1,5 @@
 #! python3
-# UV<->3D conversion, surface metrics, frames, distortion compensation, and curve pullback.
+# UV<->3D conversion, projected grids, frames, distortion compensation, and curve pullback.
 
 import Rhino
 import scriptcontext
@@ -74,49 +74,6 @@ def local_scale(face_record, u, v):
     return derivatives[0].Length * span_u, derivatives[1].Length * span_v
 
 
-class SurfaceMetricSampler:
-    """Live-face sampler for area-weighted, direction-independent placement."""
-
-    def __init__(self, face_record):
-        self.face_record = face_record
-        self.face = face_record.resolve_face()
-        self.surface = self.face.UnderlyingSurface() if self.face is not None else None
-
-    def sample(self, u, v):
-        """Return (3D point, normalized-UV area scale) or None outside the trimmed face."""
-        if self.face is None or self.surface is None:
-            return None
-        su, sv = _denormalize(self.face_record, u, v)
-        if self.face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
-            return None
-        ok, point, derivatives = self.surface.Evaluate(su, sv, 1)
-        if not ok or derivatives is None or len(derivatives) < 2:
-            return None
-        cross = Rhino.Geometry.Vector3d.CrossProduct(derivatives[0], derivatives[1])
-        span_u = abs(self.face_record.domain_u[1] - self.face_record.domain_u[0])
-        span_v = abs(self.face_record.domain_v[1] - self.face_record.domain_v[0])
-        area_scale = cross.Length * span_u * span_v
-        if area_scale <= 1e-12:
-            return None
-        return point, area_scale
-
-    def estimate_area(self, divisions=12):
-        """Return (trimmed area estimate, maximum sampled normalized-UV area scale)."""
-        divisions = max(int(divisions), 2)
-        area_sum = 0.0
-        max_scale = 0.0
-        for i in range(divisions):
-            u = (i + 0.5) / divisions
-            for j in range(divisions):
-                sample = self.sample(u, (j + 0.5) / divisions)
-                if sample is None:
-                    continue
-                _point, area_scale = sample
-                area_sum += area_scale
-                max_scale = max(max_scale, area_scale)
-        return area_sum / (divisions * divisions), max_scale
-
-
 def _resolve_with_bbox(face_records):
     """Resolve live faces and their union bounding box: ([(record, face), ...], bbox)."""
     resolved = []
@@ -139,10 +96,68 @@ def _closest_on_face(resolved, point):
             continue
         if face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
             continue
-        distance = point.DistanceTo(record.surface.PointAt(su, sv))
+        distance = point.DistanceTo(face.PointAt(su, sv))
         if best is None or distance < best[0]:
             best = (distance, record, su, sv)
     return best
+
+
+def default_projection_plane(face_records):
+    """Axis-aligned plane through the targets, facing their shallowest bounding-box axis."""
+    _resolved, bbox = _resolve_with_bbox(face_records)
+    if not bbox.IsValid:
+        return None
+    extent = bbox.Max - bbox.Min
+    if extent.Z <= extent.X and extent.Z <= extent.Y:
+        normal = Rhino.Geometry.Vector3d.ZAxis
+    elif extent.Y <= extent.X:
+        normal = Rhino.Geometry.Vector3d.YAxis
+    else:
+        normal = Rhino.Geometry.Vector3d.XAxis
+    return Rhino.Geometry.Plane(bbox.Center, normal)
+
+
+def plane_grid_extent(face_records, plane):
+    """Targets' bounding box in projection-plane coordinates as (s_min, s_max, t_min, t_max)."""
+    _resolved, bbox = _resolve_with_bbox(face_records)
+    if not bbox.IsValid:
+        return None
+    s_values, t_values = [], []
+    for corner in bbox.GetCorners():
+        ok, s, t = plane.ClosestParameter(corner)
+        if ok:
+            s_values.append(s)
+            t_values.append(t)
+    if not s_values:
+        return None
+    return min(s_values), max(s_values), min(t_values), max(t_values)
+
+
+def project_plane_points(face_records, plane, points):
+    """Project plane-space grid points directionally to selected trimmed faces."""
+    resolved, bbox = _resolve_with_bbox(face_records)
+    if not resolved or not bbox.IsValid or not points:
+        return []
+    tolerance = scriptcontext.doc.ModelAbsoluteTolerance
+    depth = max(bbox.Diagonal.Length, tolerance * 10.0)
+    source_points = [plane.PointAt(s, t, -depth) for s, t in points]
+    breps = [face.DuplicateFace(False) for _record, face in resolved]
+    projected = Rhino.Geometry.Intersect.Intersection.ProjectPointsToBreps(
+        breps, source_points, plane.Normal, tolerance
+    )
+    if projected is None:
+        return []
+
+    hits = []
+    max_distance = tolerance * 10.0
+    for point in projected:
+        best = _closest_on_face(resolved, point)
+        if best is None or best[0] > max_distance:
+            continue
+        _distance, record, su, sv = best
+        u, v = _normalize(record, su, sv)
+        hits.append((record, u, v))
+    return hits
 
 
 def closest_face_uv(face_records, point, max_distance=None):

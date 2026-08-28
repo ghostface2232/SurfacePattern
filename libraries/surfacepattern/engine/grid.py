@@ -22,11 +22,6 @@ DEFAULTS = {
 
 MAX_ROWS = 1000
 MAX_COLS = 1000
-SURFACE_CANDIDATES_PER_POINT = 36
-MAX_SURFACE_CANDIDATES = 120000
-MAX_SURFACE_POINTS = 50000
-MAX_DRAFT_SURFACE_CANDIDATES = 16000
-DEFAULT_DRAFT_CAP = 1500
 
 
 def param(session, key):
@@ -91,88 +86,45 @@ def _generate_uv(session):
 
 
 def _generate_surface_equal(session):
-    """Surface mode: isotropic Poisson-like placements independent of UV directions."""
+    """Surface mode: fixed plane-space lattice projected to faces and clipped by trims."""
     rng = random.Random(int(param(session, "seed")))
-    extent_x, extent_y = _shape_extent(session)
-    gap = max(float(param(session, "spacing_x")), 0.0)
-    spacing = max(max(extent_x, extent_y) + gap, 1e-3)
-
-    samplers = []
-    estimated_total = 0
-    for record in session.targets:
-        sampler = mapping.SurfaceMetricSampler(record)
-        area, max_area_scale = sampler.estimate_area()
-        if area <= 1e-9 or max_area_scale <= 1e-12:
-            continue
-        estimated_count = max(1, int(math.ceil(area / (spacing * spacing))))
-        estimated_total += estimated_count
-        samplers.append((record, sampler, estimated_count, max_area_scale))
-    if not samplers:
+    plane = mapping.default_projection_plane(session.targets)
+    if plane is None:
         return []
+    extent = mapping.plane_grid_extent(session.targets, plane)
+    if extent is None:
+        return []
+    s_min, s_max, t_min, t_max = extent
 
-    point_limit = MAX_SURFACE_POINTS
-    candidates_per_point = SURFACE_CANDIDATES_PER_POINT
-    max_candidates = MAX_SURFACE_CANDIDATES
-    if session.preview_quality == "draft":
-        point_limit = max(int(session.params.get("draft_cap", DEFAULT_DRAFT_CAP)), 1)
-        candidates_per_point = 8
-        max_candidates = MAX_DRAFT_SURFACE_CANDIDATES
-    target_count = min(estimated_total, point_limit)
-    candidate_limit = min(
-        max(target_count * candidates_per_point, 256), max_candidates
-    )
+    step_x, step_y = _center_steps(session)
+    grid_type = param(session, "grid_type")
+    stagger = grid_type in ("staggered", "triangular")
+    row_factor = math.sqrt(3.0) / 2.0 if grid_type == "triangular" else 1.0
+    row_step = step_y * row_factor
+    position_jitter = float(param(session, "jitter_position")) / 100.0
 
-    candidates = []
-    for record, sampler, estimated_count, max_area_scale in samplers:
-        share = estimated_count / float(estimated_total)
-        budget = max(64, int(round(candidate_limit * share)))
-        for _index in range(budget):
-            u, v = rng.random(), rng.random()
-            sample = sampler.sample(u, v)
-            if sample is None:
-                continue
-            point, area_scale = sample
-            if rng.random() * max_area_scale <= area_scale:
-                candidates.append((record, u, v, point))
-    rng.shuffle(candidates)
+    points = []
+    row_index = 0
+    t = t_min + row_step * 0.5
+    while t < t_max and row_index < MAX_ROWS:
+        s = s_min + step_x * 0.5 + (step_x * 0.5 if stagger and row_index % 2 else 0.0)
+        column = 0
+        while s < s_max and column < MAX_COLS:
+            ss, tt = s, t
+            if position_jitter > 0.0:
+                ss += position_jitter * step_x * rng.uniform(-0.5, 0.5)
+                tt += position_jitter * row_step * rng.uniform(-0.5, 0.5)
+            points.append((ss, tt))
+            s += step_x
+            column += 1
+        t += row_step
+        row_index += 1
 
-    spacing_squared = spacing * spacing
-    cells = {}
     placements = []
-    for record, u, v, point in candidates:
-        cell = _spatial_cell(point, spacing)
-        if _has_nearby_point(cells, cell, point, spacing_squared):
-            continue
-        cells.setdefault(cell, []).append(point)
+    for record, u, v in mapping.project_plane_points(session.targets, plane, points):
         size, rotation = _jittered_attributes(session, rng)
         placements.append((record, u, v, size, rotation))
-        if len(placements) >= target_count:
-            break
     return placements
-
-
-def _spatial_cell(point, spacing):
-    """Integer 3D hash cell for one model-space point."""
-    return (
-        int(math.floor(point.X / spacing)),
-        int(math.floor(point.Y / spacing)),
-        int(math.floor(point.Z / spacing)),
-    )
-
-
-def _has_nearby_point(cells, cell, point, spacing_squared):
-    """True when a point in this or a neighboring hash cell violates minimum spacing."""
-    cx, cy, cz = cell
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for dz in (-1, 0, 1):
-                for other in cells.get((cx + dx, cy + dy, cz + dz), ()):
-                    px = point.X - other.X
-                    py = point.Y - other.Y
-                    pz = point.Z - other.Z
-                    if px * px + py * py + pz * pz < spacing_squared:
-                        return True
-    return False
 
 
 def _face_lattice(session, record, rng):

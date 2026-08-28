@@ -50,6 +50,8 @@ def main():
             "shape": "circle",
             "size": hole_diameter,
             "spacing_x": spacing - hole_diameter,
+            "spacing_y": spacing - hole_diameter,
+            "grid_type": "square",
             "jitter_position": 0.0,
             "jitter_size": 0.0,
             "jitter_rotation": 0.0,
@@ -70,7 +72,7 @@ def main():
     scriptcontext.doc.Views.Redraw()
 
     Rhino.RhinoApp.WriteLine(
-        "SPDev_TestMapping: {} faces, {} isotropic circles at min spacing {:.1f}, "
+        "SPDev_TestMapping: {} faces, {} projected-grid circles at spacing {:.1f}, "
         "{} pullback fallbacks".format(
             len(current.targets), added, spacing, fallbacks
         )
