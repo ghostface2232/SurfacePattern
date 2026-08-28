@@ -7,6 +7,85 @@ import Rhino
 import scriptcontext
 
 STICKY_KEY = "surfacepattern_session"
+DOC_EVENTS_KEY = "surfacepattern_doc_events"
+REFRESH_PENDING_KEY = "surfacepattern_refresh_pending"
+
+
+# Document lifecycle: the sticky session and the display conduit outlive any single
+# document, so without these handlers the orange preview survives into new/opened
+# documents and stays stale after undo deletes a referenced object (AGENTS.md §8).
+
+
+def _teardown_session(_sender=None, _event=None):
+    """Document closed/new/opened: drop doc references and stop drawing the preview.
+
+    Registered stamps survive (they are document-independent normalized copies);
+    everything referencing document objects is cleared.
+    """
+    try:
+        from surfacepattern.preview.conduit import CONDUIT_STICKY_KEY
+
+        session = scriptcontext.sticky.get(STICKY_KEY)
+        if session is not None:
+            session.targets = []
+            session.attractors = []
+            session.manual_placements = []
+            session.freehand_strokes = []
+            session.clear_preview()
+        conduit = scriptcontext.sticky.get(CONDUIT_STICKY_KEY)
+        if conduit is not None:
+            conduit.Enabled = False  # no redraw: the document may be mid-close
+    except Exception:
+        pass  # document event handlers must never raise into Rhino
+
+
+def _schedule_preview_refresh():
+    """Run a full recompute on the next idle tick — never inside a document event."""
+    if scriptcontext.sticky.get(REFRESH_PENDING_KEY):
+        return
+    scriptcontext.sticky[REFRESH_PENDING_KEY] = True
+
+    def _on_idle(_sender, _event):
+        Rhino.RhinoApp.Idle -= _on_idle
+        scriptcontext.sticky[REFRESH_PENDING_KEY] = False
+        try:
+            session = scriptcontext.sticky.get(STICKY_KEY)
+            if session is not None:
+                session.request_recompute(False)
+        except Exception:
+            pass  # idle handlers must never raise into Rhino
+
+    Rhino.RhinoApp.Idle += _on_idle
+
+
+def _on_delete_object(_sender, event):
+    """A session-referenced object was deleted (directly or via undo/redo): refresh.
+
+    The deferred recompute prunes the dead reference and clears or rebuilds the
+    preview, so stale orange curves never linger after Ctrl+Z.
+    """
+    try:
+        session = scriptcontext.sticky.get(STICKY_KEY)
+        if session is None:
+            return
+        object_id = event.ObjectId
+        if object_id in session.attractors or any(
+            record.object_id == object_id for record in session.targets
+        ):
+            _schedule_preview_refresh()
+    except Exception:
+        pass  # document event handlers must never raise into Rhino
+
+
+def _ensure_doc_events():
+    """Register the document-lifecycle handlers once per Rhino session."""
+    if scriptcontext.sticky.get(DOC_EVENTS_KEY):
+        return
+    Rhino.RhinoDoc.CloseDocument += _teardown_session
+    Rhino.RhinoDoc.NewDocument += _teardown_session
+    Rhino.RhinoDoc.EndOpenDocument += _teardown_session
+    Rhino.RhinoDoc.DeleteRhinoObject += _on_delete_object
+    scriptcontext.sticky[DOC_EVENTS_KEY] = True
 
 
 @dataclass
@@ -45,11 +124,23 @@ class PatternSession:
     preview_records: list = field(default_factory=list)       # FaceRecord per full curve (None for strokes)
     preview_draft_curves: list = field(default_factory=list)  # polyline approximations
     preview_quality: str = "draft"                   # "draft" | "full"
+    preview_enabled: bool = True                     # user's preview toggle; conduit follows this
     pullback_failures: int = 0                       # curves that fell back to planar on last full recompute
 
     def suggest_placement_mode(self):
-        """Return the default placement mode for the current targets: 'uv' or 'world'."""
-        return "uv" if len(self.targets) == 1 else "world"
+        """Return the target-aware default: UV for one face, surface-equal for many."""
+        return "uv" if len(self.targets) == 1 else "surface"
+
+    def normalize_placement_mode(self):
+        """Migrate removed world presets/state and return a supported placement mode."""
+        self.params.pop("projection_plane", None)
+        mode = self.params.get("placement_mode", "uv")
+        if mode == "world":
+            mode = "surface"
+        elif mode not in ("uv", "surface"):
+            mode = "uv"
+        self.params["placement_mode"] = mode
+        return mode
 
     def prune_dead_targets(self):
         """Drop targets whose source object no longer resolves; return number removed."""
@@ -95,7 +186,8 @@ class PatternSession:
         """Turn the preview conduit on/off — the ui layer's only path to the conduit."""
         from surfacepattern.preview.conduit import get_conduit
 
-        if enabled:
+        self.preview_enabled = bool(enabled)
+        if self.preview_enabled:
             get_conduit().enable()
         else:
             get_conduit().disable()
@@ -164,22 +256,32 @@ class PatternSession:
                         self.pullback_failures
                     )
                 )
-        get_conduit().enable()  # enables when needed; always redraws
+        # The recompute is authoritative over the conduit: honor the user's preview
+        # toggle instead of unconditionally re-enabling (a disabled preview used to
+        # come back on every slider drag).
+        conduit = get_conduit()
+        if self.preview_enabled:
+            conduit.enable()   # enables when needed; always redraws
+        else:
+            conduit.disable()
 
 
 def get_session():
     """Return the singleton PatternSession stored in scriptcontext.sticky."""
+    _ensure_doc_events()
     existing = scriptcontext.sticky.get(STICKY_KEY)
     # Name-based check keeps the session alive across ScriptEditor module reloads,
     # where the class object identity changes and isinstance() would fail.
     if existing is not None and type(existing).__name__ == "PatternSession":
         if type(existing) is PatternSession:
+            existing.normalize_placement_mode()
             return existing
         # Instance from before a module reload: rebind its state onto the current
         # class so fields and methods added since (e.g. stamp state) exist.
         migrated = PatternSession()
         for name in migrated.__dataclass_fields__:
             setattr(migrated, name, getattr(existing, name, getattr(migrated, name)))
+        migrated.normalize_placement_mode()
         scriptcontext.sticky[STICKY_KEY] = migrated
         return migrated
     fresh = PatternSession()

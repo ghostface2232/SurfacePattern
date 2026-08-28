@@ -19,7 +19,7 @@ from surfacepattern.core import mapping
 from surfacepattern.engine import grid
 
 DEFAULTS = {
-    "stamp_size": 10.0,           # mm; bounding size of a placed stamp
+    "stamp_size": 1.0,            # mm; bounding size of a placed stamp
     "stamp_rotation": 0.0,        # degrees, applied to every placement
     "stamp_jitter": 0.0,          # 0-100 (%); size and rotation jitter
     "stamp_select": "cycle",      # "cycle" | "random" among registered stamps

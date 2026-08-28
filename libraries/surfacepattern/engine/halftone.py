@@ -11,8 +11,8 @@ DEFAULTS = {
     "halftone_radius": 50.0,     # mm; attractor influence radius
     "halftone_profile": "linear",  # "linear" | "smooth" | "gaussian"
     "halftone_invert": False,    # False: large near attractors
-    "halftone_size_min": 1.0,    # mm
-    "halftone_size_max": 6.0,    # mm
+    "halftone_size_min": 0.0,    # mm
+    "halftone_size_max": 1.0,    # mm
     "halftone_cull": 0.0,        # mm; shapes below this size are dropped, 0 disables
 }
 DEFAULT_DRAFT_CAP = 1500

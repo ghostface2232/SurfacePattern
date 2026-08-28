@@ -1,5 +1,5 @@
 #! python3
-# UV<->3D conversion, surface frames, distortion compensation, world-grid projection, curve pullback.
+# UV<->3D conversion, surface frames, distortion compensation, and curve pullback.
 
 import Rhino
 import scriptcontext
@@ -74,6 +74,48 @@ def local_scale(face_record, u, v):
     return derivatives[0].Length * span_u, derivatives[1].Length * span_v
 
 
+def equal_arc_parameters(face_record, axis, fixed_parameter, spacing, offset=0.5, max_count=1000):
+    """Normalized parameters spaced by true 3D arc length on one surface isocurve.
+
+    ``axis`` is the changing normalized direction ("u" or "v");
+    ``fixed_parameter`` is the normalized coordinate on the other axis. The first
+    sample is ``offset * spacing`` from the isocurve start. Trim culling remains
+    the engine's responsibility because an isocurve can cross several trim regions.
+    """
+    if spacing <= 0.0 or max_count <= 0:
+        return []
+    fixed = min(max(float(fixed_parameter), 0.0), 1.0)
+    if axis == "u":
+        _su, sv = _denormalize(face_record, 0.0, fixed)
+        curve = face_record.surface.IsoCurve(0, sv)
+    elif axis == "v":
+        su, _sv = _denormalize(face_record, fixed, 0.0)
+        curve = face_record.surface.IsoCurve(1, su)
+    else:
+        raise ValueError("axis must be 'u' or 'v'")
+    if curve is None:
+        return []
+
+    length = curve.GetLength()
+    if length <= 1e-9:
+        return []
+    domain = curve.Domain
+    domain_length = domain.T1 - domain.T0
+    if abs(domain_length) <= 1e-12:
+        return []
+
+    parameters = []
+    distance = max(float(offset), 0.0) * spacing
+    while distance < length and len(parameters) < max_count:
+        ok, curve_parameter = curve.LengthParameter(distance)
+        if not ok:
+            break
+        normalized = (curve_parameter - domain.T0) / domain_length
+        parameters.append(min(max(normalized, 0.0), 1.0))
+        distance += spacing
+    return parameters
+
+
 def _resolve_with_bbox(face_records):
     """Resolve live faces and their union bounding box: ([(record, face), ...], bbox)."""
     resolved = []
@@ -85,38 +127,6 @@ def _resolve_with_bbox(face_records):
         resolved.append((record, face))
         bbox.Union(face.GetBoundingBox(True))
     return resolved, bbox
-
-
-def default_projection_plane(face_records):
-    """Axis-aligned plane through the bbox center facing its widest side; None without targets."""
-    _resolved, bbox = _resolve_with_bbox(face_records)
-    if not bbox.IsValid:
-        return None
-    extent = bbox.Max - bbox.Min
-    center = bbox.Center
-    if extent.Z <= extent.X and extent.Z <= extent.Y:
-        normal = Rhino.Geometry.Vector3d.ZAxis
-    elif extent.Y <= extent.X:
-        normal = Rhino.Geometry.Vector3d.YAxis
-    else:
-        normal = Rhino.Geometry.Vector3d.XAxis
-    return Rhino.Geometry.Plane(center, normal)
-
-
-def plane_grid_extent(face_records, plane):
-    """Targets' bbox expressed in plane coordinates: (s_min, s_max, t_min, t_max); None if empty."""
-    _resolved, bbox = _resolve_with_bbox(face_records)
-    if not bbox.IsValid:
-        return None
-    s_values, t_values = [], []
-    for corner in bbox.GetCorners():
-        ok, s, t = plane.ClosestParameter(corner)
-        if ok:
-            s_values.append(s)
-            t_values.append(t)
-    if not s_values:
-        return None
-    return min(s_values), max(s_values), min(t_values), max(t_values)
 
 
 def _closest_on_face(resolved, point):
@@ -134,35 +144,6 @@ def _closest_on_face(resolved, point):
     return best
 
 
-def project_plane_points(face_records, plane, points, max_distance=None):
-    """Project plane-space (s, t) points onto the closest face.
-
-    Returns a list aligned with the input: (face_record, u, v) with normalized UV for
-    projected points, None for culled ones. A point is kept only for its closest face,
-    only when it lands on the trimmed region, and only when the projection distance
-    stays under max_distance (default: half the targets' bbox diagonal, floored at
-    document tolerance) — far misses pulled to face borders are culled.
-    """
-    resolved, bbox = _resolve_with_bbox(face_records)
-    if not resolved or not bbox.IsValid:
-        return [None] * len(points)
-    if max_distance is None:
-        max_distance = max(
-            bbox.Diagonal.Length * 0.5, scriptcontext.doc.ModelAbsoluteTolerance
-        )
-
-    results = []
-    for s, t in points:
-        best = _closest_on_face(resolved, plane.PointAt(s, t))
-        if best is not None and best[0] <= max_distance:
-            _distance, record, su, sv = best
-            u, v = _normalize(record, su, sv)
-            results.append((record, u, v))
-        else:
-            results.append(None)
-    return results
-
-
 def closest_face_uv(face_records, point, max_distance=None):
     """Closest on-face hit to a 3D point: (face_record, u, v) normalized; None when out of range."""
     resolved, bbox = _resolve_with_bbox(face_records)
@@ -178,23 +159,6 @@ def closest_face_uv(face_records, point, max_distance=None):
     _distance, record, su, sv = best
     u, v = _normalize(record, su, sv)
     return record, u, v
-
-
-def world_grid_projection(face_records, spacing, plane, max_distance=None):
-    """Project a square planar world grid onto the nearest face; [(face_record, u, v), ...]."""
-    if spacing <= 0.0 or not face_records:
-        return []
-    extent = plane_grid_extent(face_records, plane)
-    if extent is None:
-        return []
-    s_min, s_max, t_min, t_max = extent
-    points = []
-    s_count = int((s_max - s_min) / spacing) + 1
-    t_count = int((t_max - t_min) / spacing) + 1
-    for i in range(s_count + 1):
-        for j in range(t_count + 1):
-            points.append((s_min + i * spacing, t_min + j * spacing))
-    return [hit for hit in project_plane_points(face_records, plane, points, max_distance) if hit]
 
 
 def place_unit_curve_flat(face_record, u, v, unit_curve, size, rotation):

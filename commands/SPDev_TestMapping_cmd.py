@@ -10,18 +10,27 @@ TARGET_DIVISIONS = 15   # grid cells along the larger face dimension
 HOLE_RATIO = 0.5        # hole diameter as a fraction of grid spacing (perf-panel look)
 
 
-def grid_counts_for_face(record):
-    """Derive (u_count, v_count, spacing_3d) from the face's physical size at its center."""
+def spacing_for_face(record):
+    """Derive a visual-test spacing from the face's physical size at its center."""
     scale = mapping.local_scale(record, 0.5, 0.5)
     if scale is None:
-        return 10, 10, 0.0
+        return 0.0
     size_u, size_v = scale
     spacing = max(size_u, size_v) / TARGET_DIVISIONS
     if spacing <= 0.0:
-        return 10, 10, 0.0
-    u_count = max(2, int(round(size_u / spacing)))
-    v_count = max(2, int(round(size_v / spacing)))
-    return u_count, v_count, spacing
+        return 0.0
+    return spacing
+
+
+def equal_surface_grid(record, spacing):
+    """Arc-length-spaced normalized UV points for visual Uniform Surface checks."""
+    points = []
+    rows = mapping.equal_arc_parameters(record, "v", 0.5, spacing, max_count=1000)
+    for v in rows:
+        for u in mapping.equal_arc_parameters(record, "u", v, spacing, max_count=1000):
+            if mapping.is_point_on_face(record, u, v):
+                points.append((u, v))
+    return points
 
 
 def main():
@@ -38,14 +47,15 @@ def main():
     added = 0
     fallbacks = 0
     for record in current.targets:
-        u_count, v_count, spacing = grid_counts_for_face(record)
+        spacing = spacing_for_face(record)
         if spacing <= 0.0:
             Rhino.RhinoApp.WriteLine(
                 "SPDev_TestMapping: face {} has degenerate size, skipped.".format(record.face_index)
             )
             continue
         hole_diameter = spacing * HOLE_RATIO
-        for u, v in mapping.uv_grid(record, u_count, v_count):
+        points = equal_surface_grid(record, spacing)
+        for u, v in points:
             curve, pulled = mapping.place_unit_curve(record, u, v, unit_circle, hole_diameter, 0.0)
             if curve is None:
                 continue
@@ -54,8 +64,9 @@ def main():
             if not pulled:
                 fallbacks += 1
         Rhino.RhinoApp.WriteLine(
-            "SPDev_TestMapping: face {}: {}x{} grid, spacing ~{:.1f}, hole d={:.1f}".format(
-                record.face_index, u_count, v_count, spacing, hole_diameter
+            "SPDev_TestMapping: face {}: {} Uniform Surface points, "
+            "spacing {:.1f}, hole d={:.1f}".format(
+                record.face_index, len(points), spacing, hole_diameter
             )
         )
     scriptcontext.doc.EndUndoRecord(undo_serial)

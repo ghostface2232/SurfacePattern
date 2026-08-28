@@ -19,11 +19,15 @@ PANEL_STICKY_KEY = "surfacepattern_panel"
 DRAFT_INTERVAL = 0.07    # seconds; draft recompute cadence while dragging
 COMMIT_INTERVAL = 0.25   # seconds of inactivity before the full recompute
 NOTICE_INTERVAL = 0.8    # seconds the clamp notice stays visible
+PANEL_WIDTH = 380        # fixed content width; the body scrolls vertically
+PANEL_HEIGHT = 700       # initial height; user-resizable vertically
+DROPDOWN_WIDTH = 150
 
 PATTERN_MODES = ["grid", "halftone", "stamp"]
 SHAPE_OPTIONS = ["circle", "slot", "hex"]
 GRID_TYPE_OPTIONS = ["square", "staggered", "triangular"]
-PLACEMENT_OPTIONS = ["uv", "world"]
+PLACEMENT_OPTIONS = ["uv", "surface"]
+PLACEMENT_LABELS = ["UV", "Uniform Surface"]
 HALFTONE_PROFILES = ["linear", "smooth", "gaussian"]
 STAMP_PLACE_MODES = ["array", "click", "freehand"]
 STAMP_PLACE_LABELS = ["Array", "Click Place", "Freehand"]
@@ -35,10 +39,10 @@ PARAM_DEFAULTS = {
     "pattern_mode": "grid",
     "placement_mode": "uv",
     "shape": "circle",
-    "size": 4.0,
+    "size": 1.0,
     "slot_ratio": 0.4,
-    "spacing_x": 10.0,
-    "spacing_y": 10.0,
+    "spacing_x": 1.0,
+    "spacing_y": 1.0,
     "grid_type": "square",
     "jitter_position": 0.0,
     "jitter_size": 0.0,
@@ -48,10 +52,10 @@ PARAM_DEFAULTS = {
     "halftone_radius": 50.0,
     "halftone_profile": "linear",
     "halftone_invert": False,
-    "halftone_size_min": 1.0,
-    "halftone_size_max": 6.0,
+    "halftone_size_min": 0.0,
+    "halftone_size_max": 1.0,
     "halftone_cull": 0.0,
-    "stamp_size": 10.0,
+    "stamp_size": 1.0,
     "stamp_rotation": 0.0,
     "stamp_jitter": 0.0,
     "stamp_select": "cycle",
@@ -59,6 +63,16 @@ PARAM_DEFAULTS = {
     "bake_mode": "curves",
     "bake_keep_original": True,
 }
+
+
+def border_none():
+    """Eto.Forms.BorderType.None — 'None' is a Python keyword, and depending on the
+    pythonnet version the enum member is exposed as 'None', 'None_', or not at all."""
+    for name in ("None", "None_"):
+        member = getattr(Eto.Forms.BorderType, name, None)
+        if member is not None:
+            return member
+    return Eto.Forms.BorderType(2)  # enum order: Bezel, Line, None
 
 
 def make_label(text):
@@ -226,13 +240,17 @@ class SurfacePatternPanel(Eto.Forms.Form):
         super().__init__()
         self.Title = "SurfacePattern"
         self.Padding = Eto.Drawing.Padding(8)
-        self.Resizable = False
+        # Vertical room varies per pattern mode: the body scrolls, the footer stays
+        # fixed, and the user may resize the height.
+        self.Resizable = True
         self.Maximizable = False
         self.Minimizable = False
+        self.MinimumSize = Eto.Drawing.Size(PANEL_WIDTH, 420)
 
         session = get_session()
         for key, value in PARAM_DEFAULTS.items():
             session.params.setdefault(key, value)
+        session.normalize_placement_mode()
 
         self._loading_preset = False  # suppresses recompute storms while applying a preset
         self._draft_dirty = False
@@ -245,14 +263,18 @@ class SurfacePatternPanel(Eto.Forms.Form):
 
         self.Content = self._build_layout(session)
         self._apply_mode_visibility(session.params.get("pattern_mode", "grid"))
+        self.Size = Eto.Drawing.Size(PANEL_WIDTH, PANEL_HEIGHT)
         self.Shown += eto_handler(self._on_shown)
         self.Closed += eto_handler(self._on_closed)
 
     # ---- layout -------------------------------------------------------------
 
     def _build_layout(self, session):
-        layout = Eto.Forms.DynamicLayout()
-        layout.Spacing = Eto.Drawing.Size(6, 6)
+        # Single-column body: mixing 1-cell section rows with multi-cell rows in one
+        # DynamicLayout couples their table columns and blows the panel width up, so
+        # every horizontal group is its own StackLayout instead.
+        body = Eto.Forms.DynamicLayout()
+        body.Spacing = Eto.Drawing.Size(6, 6)
 
         # (1) Target section: pick button, summary label, placement-mode dropdown.
         self.pick_button = Eto.Forms.Button()
@@ -261,10 +283,13 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.target_label = Eto.Forms.Label()
         self.target_label.Text = self._target_summary(session)
         self.placement_dropdown = self._dropdown(
-            PLACEMENT_OPTIONS, session.params.get("placement_mode", "uv"), "placement_mode"
+            PLACEMENT_OPTIONS,
+            session.params.get("placement_mode", "uv"),
+            "placement_mode",
+            PLACEMENT_LABELS,
         )
-        layout.AddRow(self.pick_button, self.target_label, None)
-        layout.AddRow(make_label("Placement"), self.placement_dropdown, None)
+        body.AddRow(self._hstack(self.pick_button, self.target_label))
+        body.AddRow(self._hstack(make_label("Placement"), self.placement_dropdown))
 
         # (2) Pattern-mode segment: grid / halftone / stamp.
         self.mode_segment = Eto.Forms.RadioButtonList()
@@ -277,37 +302,48 @@ class SurfacePatternPanel(Eto.Forms.Form):
             PATTERN_MODES.index(current_mode) if current_mode in PATTERN_MODES else 0
         )
         self.mode_segment.SelectedIndexChanged += eto_handler(self._mode_changed)
-        layout.AddRow(self.mode_segment, None)
+        body.AddRow(self.mode_segment)
 
-        # (3) Shared layout section (lattice parameters used by grid AND halftone),
-        # then per-mode parameter sections, all collapsible.
+        # (3) Hole Size up top: the one knob a perforation pass always needs (grid
+        # mode; halftone and stamp bring their own size controls in their sections).
         self.sliders = {}
+        self.hole_size_row = Eto.Forms.DynamicLayout()
+        self.hole_size_row.Spacing = Eto.Drawing.Size(6, 4)
+        self.hole_size_row.AddRow(*self._slider("Hole Size", "size", 0.1, 50.0, 0.1, "mm"))
+        body.AddRow(self.hole_size_row)
+
+        # (4) Shared layout section (lattice parameters used by grid AND halftone),
+        # then per-mode parameter sections, all collapsible.
         self.layout_section = self._layout_section(session)
-        layout.AddRow(self.layout_section)
+        body.AddRow(self.layout_section)
         self.mode_sections = {
-            "grid": self._grid_section(session),
             "halftone": self._halftone_section(session),
             "stamp": self._stamp_section(session),
         }
-        for mode in PATTERN_MODES:
-            layout.AddRow(self.mode_sections[mode])
+        for section in self.mode_sections.values():
+            body.AddRow(section)
 
-        # (4) Preview toggle.
+        # The body scrolls so taller sections (halftone/stamp) never clip.
+        self.body_scrollable = Eto.Forms.Scrollable()
+        self.body_scrollable.Border = border_none()
+        self.body_scrollable.ExpandContentHeight = False
+        self.body_scrollable.Content = body
+
+        # (4) Fixed footer: preview toggle, error notice, presets, bake — always
+        # visible regardless of body scroll. Destructive actions run only from
+        # these explicit clicks.
         self.preview_checkbox = Eto.Forms.CheckBox()
         self.preview_checkbox.Text = "Preview"
         self.preview_checkbox.Checked = True
         self.preview_checkbox.CheckedChanged += eto_handler(self._preview_toggled)
-        layout.AddRow(self.preview_checkbox, None)
 
         # Error status: brief red notice; details live in the log file.
         self.error_label = Eto.Forms.Label()
         self.error_label.Text = ""
         self.error_label.TextColor = Eto.Drawing.Colors.Red
-        layout.AddRow(self.error_label, None)
 
-        # (5) Fixed footer: preset dropdown + save, bake mode + keep-original + bake.
-        # Destructive actions run only from these explicit clicks.
         self.preset_dropdown = Eto.Forms.DropDown()
+        self.preset_dropdown.Width = DROPDOWN_WIDTH
         self._preset_names = []
         self._refresh_preset_dropdown()
         self.preset_dropdown.SelectedIndexChanged += eto_handler(self._preset_selected)
@@ -316,6 +352,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.save_preset_button.Click += eto_handler(self._save_preset)
 
         self.bake_mode_dropdown = Eto.Forms.DropDown()
+        self.bake_mode_dropdown.Width = DROPDOWN_WIDTH
         for label in BAKE_MODE_LABELS:
             add_list_item(self.bake_mode_dropdown.Items, label)
         current_bake = session.params.get("bake_mode", "curves")
@@ -332,9 +369,31 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.bake_button.Text = "Bake"
         self.bake_button.Click += eto_handler(self._bake)
 
-        layout.AddRow(self.preset_dropdown, self.save_preset_button, None)
-        layout.AddRow(self.bake_mode_dropdown, self.keep_original_checkbox, self.bake_button)
-        return layout
+        footer = Eto.Forms.DynamicLayout()
+        footer.Spacing = Eto.Drawing.Size(6, 6)
+        footer.AddRow(self.preview_checkbox)
+        footer.AddRow(self.error_label)
+        footer.AddRow(self._hstack(self.preset_dropdown, self.save_preset_button))
+        footer.AddRow(
+            self._hstack(self.bake_mode_dropdown, self.keep_original_checkbox, self.bake_button)
+        )
+
+        root = Eto.Forms.DynamicLayout()
+        root.Spacing = Eto.Drawing.Size(6, 6)
+        root.Add(self.body_scrollable, None, True)  # body absorbs vertical resize
+        root.Add(footer)
+        return root
+
+    def _hstack(self, *controls):
+        """Horizontal group with centered alignment — keeps rows out of the shared
+        DynamicLayout column grid so one wide control cannot stretch the others."""
+        stack = Eto.Forms.StackLayout()
+        stack.Orientation = Eto.Forms.Orientation.Horizontal
+        stack.Spacing = 6
+        stack.VerticalContentAlignment = Eto.Forms.VerticalAlignment.Center
+        for control in controls:
+            stack.Items.Add(Eto.Forms.StackLayoutItem(control))
+        return stack
 
     def _layout_section(self, session):
         # Lattice parameters shared by the grid AND halftone engines (halftone builds
@@ -349,8 +408,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
         content.Spacing = Eto.Drawing.Size(6, 4)
         content.AddRow(make_label("Shape"), self.shape_dropdown, None)
         content.AddRow(*self._slider("Slot Ratio", "slot_ratio", 0.1, 1.0, 0.05, ""))
-        content.AddRow(*self._slider("Gap X", "spacing_x", 0.0, 100.0, 0.5, "mm"))
-        content.AddRow(*self._slider("Gap Y", "spacing_y", 0.0, 100.0, 0.5, "mm"))
+        content.AddRow(*self._slider("Gap X", "spacing_x", 0.0, 100.0, 0.1, "mm"))
+        content.AddRow(*self._slider("Gap Y", "spacing_y", 0.0, 100.0, 0.1, "mm"))
         content.AddRow(make_label("Grid Type"), self.grid_type_dropdown, None)
         content.AddRow(*self._slider("Jitter Pos", "jitter_position", 0.0, 100.0, 1.0, "%"))
         content.AddRow(*self._slider("Jitter Size", "jitter_size", 0.0, 100.0, 1.0, "%"))
@@ -358,12 +417,6 @@ class SurfacePatternPanel(Eto.Forms.Form):
         content.AddRow(*self._slider("Rotation", "rotation", 0.0, 360.0, 1.0, "deg"))
         content.AddRow(*self._slider("Seed", "seed", 0.0, 9999.0, 1.0, ""))
         return self._expander("Layout", content)
-
-    def _grid_section(self, session):
-        grid = Eto.Forms.DynamicLayout()
-        grid.Spacing = Eto.Drawing.Size(6, 4)
-        grid.AddRow(*self._slider("Size", "size", 0.5, 50.0, 0.1, "mm"))
-        return self._expander("Grid", grid)
 
     def _halftone_section(self, session):
         self.attractor_button = Eto.Forms.Button()
@@ -383,15 +436,21 @@ class SurfacePatternPanel(Eto.Forms.Form):
             )
         )
 
+        # Sliders/labeled rows share one aligned table; wide rows (button, checkbox)
+        # stay out of it so they cannot stretch the label column.
+        table = Eto.Forms.DynamicLayout()
+        table.Spacing = Eto.Drawing.Size(6, 4)
+        table.AddRow(*self._slider("Radius", "halftone_radius", 1.0, 500.0, 1.0, "mm"))
+        table.AddRow(*self._slider("Size Min", "halftone_size_min", 0.0, 50.0, 0.1, "mm"))
+        table.AddRow(*self._slider("Size Max", "halftone_size_max", 0.0, 50.0, 0.1, "mm"))
+        table.AddRow(make_label("Profile"), self.profile_dropdown, None)
+        table.AddRow(*self._slider("Cull Below", "halftone_cull", 0.0, 20.0, 0.1, "mm"))
+
         halftone = Eto.Forms.DynamicLayout()
         halftone.Spacing = Eto.Drawing.Size(6, 4)
-        halftone.AddRow(self.attractor_button, self.attractor_label, None)
-        halftone.AddRow(*self._slider("Radius", "halftone_radius", 1.0, 500.0, 1.0, "mm"))
-        halftone.AddRow(*self._slider("Size Min", "halftone_size_min", 0.0, 50.0, 0.1, "mm"))
-        halftone.AddRow(*self._slider("Size Max", "halftone_size_max", 0.0, 50.0, 0.1, "mm"))
-        halftone.AddRow(make_label("Profile"), self.profile_dropdown, None)
-        halftone.AddRow(self.invert_checkbox, None)
-        halftone.AddRow(*self._slider("Cull Below", "halftone_cull", 0.0, 20.0, 0.1, "mm"))
+        halftone.AddRow(self._hstack(self.attractor_button, self.attractor_label))
+        halftone.AddRow(table)
+        halftone.AddRow(self.invert_checkbox)
         return self._expander("Halftone", halftone)
 
     def _stamp_section(self, session):
@@ -427,16 +486,22 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.stamp_placed_label = Eto.Forms.Label()
         self.stamp_placed_label.Text = self._stamp_placed_summary(session)
 
+        # Sliders/labeled rows share one aligned table; wide rows (buttons, segment)
+        # stay out of it so they cannot stretch the label column.
+        table = Eto.Forms.DynamicLayout()
+        table.Spacing = Eto.Drawing.Size(6, 4)
+        table.AddRow(make_label("Multi-Stamp"), self.stamp_select_dropdown, None)
+        table.AddRow(*self._slider("Size", "stamp_size", 0.1, 200.0, 0.1, "mm"))
+        table.AddRow(*self._slider("Rotation", "stamp_rotation", 0.0, 360.0, 1.0, "deg"))
+        table.AddRow(*self._slider("Jitter", "stamp_jitter", 0.0, 100.0, 1.0, "%"))
+
         content = Eto.Forms.DynamicLayout()
         content.Spacing = Eto.Drawing.Size(6, 4)
-        content.AddRow(self.stamp_button, self.stamp_label, None)
-        content.AddRow(self.stamp_place_segment, None)
-        content.AddRow(make_label("Multi-Stamp"), self.stamp_select_dropdown, None)
-        content.AddRow(*self._slider("Size", "stamp_size", 0.5, 200.0, 0.5, "mm"))
-        content.AddRow(*self._slider("Rotation", "stamp_rotation", 0.0, 360.0, 1.0, "deg"))
-        content.AddRow(*self._slider("Jitter", "stamp_jitter", 0.0, 100.0, 1.0, "%"))
-        content.AddRow(self.stamp_action_button, None)
-        content.AddRow(self.stamp_clear_button, self.stamp_placed_label, None)
+        content.AddRow(self._hstack(self.stamp_button, self.stamp_label))
+        content.AddRow(self.stamp_place_segment)
+        content.AddRow(table)
+        content.AddRow(self.stamp_action_button)
+        content.AddRow(self._hstack(self.stamp_clear_button, self.stamp_placed_label))
         self._update_stamp_action()
         return self._expander("Stamp", content)
 
@@ -463,10 +528,12 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self.sliders[key] = control
         return control.row()
 
-    def _dropdown(self, options, current, key):
+    def _dropdown(self, options, current, key, labels=None):
+        """Build a dropdown whose visible labels may differ from stored option values."""
         dropdown = Eto.Forms.DropDown()
-        for option in options:
-            add_list_item(dropdown.Items, option)
+        dropdown.Width = DROPDOWN_WIDTH
+        for label in labels if labels is not None else options:
+            add_list_item(dropdown.Items, label)
         dropdown.SelectedIndex = options.index(current) if current in options else 0
         dropdown.SelectedIndexChanged += eto_handler(
             lambda sender, _event, key=key, options=options: self._param_changed(
@@ -570,6 +637,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         # The shared lattice section drives every lattice-based layout: grid,
         # halftone, and the stamp engine's array placement mode.
         place_mode = get_session().params.get("stamp_place_mode", "array")
+        self.hole_size_row.Visible = mode == "grid"
         self.layout_section.Visible = mode in ("grid", "halftone") or (
             mode == "stamp" and place_mode == "array"
         )
@@ -688,6 +756,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
             return
         session = get_session()
         session.params.update(loaded)
+        session.normalize_placement_mode()
         self._apply_params_to_controls(session)
         if session.targets:
             self._recompute(False)

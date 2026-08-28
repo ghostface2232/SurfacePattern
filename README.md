@@ -22,10 +22,10 @@ patterns.
     a mouse-following ghost preview, and freehand strokes pulled onto the face
   - Click-placed items are bulk-adjustable later via the Size/Rotation sliders
 - **Placement modes**
-  - `uv` — laid out in the face's UV space with first-derivative distortion compensation,
-    so mm spacing holds on curved faces (default for a single face)
-  - `world` — a lattice built on a common plane and projected onto the faces, giving
-    seam-free patterns across polysurfaces (default for multiple faces)
+  - `uv` — laid out in the face's UV space with lightweight first-derivative compensation
+    (fast; default for a single face)
+  - `surface` — each lattice row follows the surface's true isocurve arc length, keeping
+    center spacing stable where the UV scale expands or contracts (default for multiple faces)
 - **Live preview** — DisplayConduit based, never writes to the document
   - While dragging: polyline approximations (draft, capped at 1500 shown);
     on release: NURBS curves pulled onto the surface (full)
@@ -79,7 +79,7 @@ commands/                        Rhino command entry points
 libraries/surfacepattern/        The plugin package
   core/
     session.py                   Session singleton (sticky), target/attractor picking, recompute orchestration
-    mapping.py                   UV↔3D mapping, distortion compensation, world projection, curve placement/pullback (owns all surface evaluation)
+    mapping.py                   UV↔3D mapping, distortion compensation, arc-length sampling, curve placement/pullback (owns all surface evaluation)
     errors.py                    File logging + command-line notice
     bake.py                      Sole document writer: curve bake + trim pipeline
   engine/

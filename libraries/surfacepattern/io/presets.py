@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-# Session-tied or unserializable keys that never belong in a preset.
+# Removed world-projection state must not leak back into current presets.
 EXCLUDED_KEYS = {"projection_plane"}
 
 BUILTIN_PRESETS = {
@@ -108,7 +108,10 @@ def load_preset(name):
             return None
         if not isinstance(loaded, dict):
             return None
-        return {key: value for key, value in loaded.items() if key not in EXCLUDED_KEYS}
+        filtered = {key: value for key, value in loaded.items() if key not in EXCLUDED_KEYS}
+        if filtered.get("placement_mode") == "world":
+            filtered["placement_mode"] = "surface"
+        return filtered
     preset = BUILTIN_PRESETS.get(name)
     return dict(preset) if preset is not None else None
 
