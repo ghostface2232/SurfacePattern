@@ -39,7 +39,7 @@ surfacepattern/
     surfacepattern/
       core/
         session.py               # singleton state, recompute orchestration
-        mapping.py               # UV<->3D, frames, distortion, arc-length sampling, pullback
+        mapping.py               # UV<->3D, frames, surface metrics, distortion, pullback
         bake.py                  # bake curves, optional trim pipeline
       engine/
         grid.py                  # regular arrays (circle/slot/hex)
@@ -70,13 +70,13 @@ surfacepattern/
 
 - ui/ talks only to the session. It never imports engine, mapping, or bake directly.
 - engine/ works purely in parameter space. An engine's `generate(session)` returns placements: tuples of (face_ref, u, v, size, rotation). Engines never create 3D curves and never touch the document.
-- core/mapping.py owns every UV-to-world conversion, surface frame lookup, distortion compensation, isocurve arc-length sampling, and curve pullback. No other module calls Surface.PointAt / FrameAt / PullToBrepFace.
+- core/mapping.py owns every UV-to-world conversion, surface frame lookup, surface metric sampling, distortion compensation, and curve pullback. No other module calls Surface.PointAt / FrameAt / PullToBrepFace.
 - preview/ never adds objects to the document. bake/ is the only module that writes document objects, and it wraps each bake in a single undo record.
 - Session state lives in a singleton stored in `scriptcontext.sticky["surfacepattern_session"]` so it survives command re-entry. Access it only through `get_session()`.
 
 ## 5. Domain concepts an agent must know
 
-- Placement modes. UV mode lays the pattern in a single face's normalized UV domain with lightweight derivative compensation — fast, but spacing can drift where the UV scale changes sharply. Uniform Surface mode samples true 3D arc length along surface isocurves so center spacing remains stable through expansion and curvature. Both modes operate per face and may be discontinuous across polysurface face borders. Default: UV for a single face, Uniform Surface for polysurfaces.
+- Placement modes. UV mode lays the pattern in a single face's normalized UV domain with lightweight derivative compensation — fast, but spacing can drift where the UV scale changes sharply. Uniform Surface mode uses area-weighted, Poisson-like minimum-distance sampling in 3D model space. Its topology adapts locally: points appear as the surface expands and disappear as it contracts, independent of U/V directions and continuously across selected faces. Default: UV for a single face, Uniform Surface for polysurfaces.
 - Distortion compensation. Uniform UV spacing is non-uniform in 3D. Evaluate first derivatives (Surface.Evaluate) to get local du/dv arc-length scale and correct spacing and unit size so results look uniform in 3D. Re-evaluate per row on strongly curved faces.
 - Trim awareness. Every generated UV point is validated with BrepFace.IsPointOnFace; points in trimmed-away regions are culled. Shapes whose UV bounds cross a seam or trim border are culled or inset (margin parameter) — pulled curves that straddle seams tear.
 - Face orientation. Check BrepFace.OrientationIsReversed and flip frames so local Z always points outward.

@@ -22,6 +22,11 @@ DEFAULTS = {
 
 MAX_ROWS = 1000
 MAX_COLS = 1000
+SURFACE_CANDIDATES_PER_POINT = 36
+MAX_SURFACE_CANDIDATES = 120000
+MAX_SURFACE_POINTS = 50000
+MAX_DRAFT_SURFACE_CANDIDATES = 16000
+DEFAULT_DRAFT_CAP = 1500
 
 
 def param(session, key):
@@ -86,49 +91,88 @@ def _generate_uv(session):
 
 
 def _generate_surface_equal(session):
-    """Surface mode: lattice steps follow true isocurve arc lengths in model units."""
+    """Surface mode: isotropic Poisson-like placements independent of UV directions."""
     rng = random.Random(int(param(session, "seed")))
-    placements = []
+    extent_x, extent_y = _shape_extent(session)
+    gap = max(float(param(session, "spacing_x")), 0.0)
+    spacing = max(max(extent_x, extent_y) + gap, 1e-3)
+
+    samplers = []
+    estimated_total = 0
     for record in session.targets:
-        placements.extend(_surface_equal_lattice(session, record, rng))
+        sampler = mapping.SurfaceMetricSampler(record)
+        area, max_area_scale = sampler.estimate_area()
+        if area <= 1e-9 or max_area_scale <= 1e-12:
+            continue
+        estimated_count = max(1, int(math.ceil(area / (spacing * spacing))))
+        estimated_total += estimated_count
+        samplers.append((record, sampler, estimated_count, max_area_scale))
+    if not samplers:
+        return []
+
+    point_limit = MAX_SURFACE_POINTS
+    candidates_per_point = SURFACE_CANDIDATES_PER_POINT
+    max_candidates = MAX_SURFACE_CANDIDATES
+    if session.preview_quality == "draft":
+        point_limit = max(int(session.params.get("draft_cap", DEFAULT_DRAFT_CAP)), 1)
+        candidates_per_point = 8
+        max_candidates = MAX_DRAFT_SURFACE_CANDIDATES
+    target_count = min(estimated_total, point_limit)
+    candidate_limit = min(
+        max(target_count * candidates_per_point, 256), max_candidates
+    )
+
+    candidates = []
+    for record, sampler, estimated_count, max_area_scale in samplers:
+        share = estimated_count / float(estimated_total)
+        budget = max(64, int(round(candidate_limit * share)))
+        for _index in range(budget):
+            u, v = rng.random(), rng.random()
+            sample = sampler.sample(u, v)
+            if sample is None:
+                continue
+            point, area_scale = sample
+            if rng.random() * max_area_scale <= area_scale:
+                candidates.append((record, u, v, point))
+    rng.shuffle(candidates)
+
+    spacing_squared = spacing * spacing
+    cells = {}
+    placements = []
+    for record, u, v, point in candidates:
+        cell = _spatial_cell(point, spacing)
+        if _has_nearby_point(cells, cell, point, spacing_squared):
+            continue
+        cells.setdefault(cell, []).append(point)
+        size, rotation = _jittered_attributes(session, rng)
+        placements.append((record, u, v, size, rotation))
+        if len(placements) >= target_count:
+            break
     return placements
 
 
-def _surface_equal_lattice(session, record, rng):
-    """Build one face lattice with exact row-wise U and center-line V arc spacing."""
-    step_x, step_y = _center_steps(session)
-    grid_type = param(session, "grid_type")
-    stagger = grid_type in ("staggered", "triangular")
-    row_factor = math.sqrt(3.0) / 2.0 if grid_type == "triangular" else 1.0
-    row_step = step_y * row_factor
-    position_jitter = float(param(session, "jitter_position")) / 100.0
-
-    rows = mapping.equal_arc_parameters(
-        record, "v", 0.5, row_step, max_count=MAX_ROWS
+def _spatial_cell(point, spacing):
+    """Integer 3D hash cell for one model-space point."""
+    return (
+        int(math.floor(point.X / spacing)),
+        int(math.floor(point.Y / spacing)),
+        int(math.floor(point.Z / spacing)),
     )
-    out = []
-    for row_index, v in enumerate(rows):
-        offset = 1.0 if stagger and row_index % 2 else 0.5
-        columns = mapping.equal_arc_parameters(
-            record, "u", v, step_x, offset=offset, max_count=MAX_COLS
-        )
-        for u in columns:
-            uu, vv = u, v
-            if position_jitter > 0.0:
-                scale = mapping.local_scale(record, u, v)
-                if scale is not None and scale[0] > 1e-9 and scale[1] > 1e-9:
-                    uu += (
-                        position_jitter * step_x * rng.uniform(-0.5, 0.5) / scale[0]
-                    )
-                    vv += (
-                        position_jitter * row_step * rng.uniform(-0.5, 0.5) / scale[1]
-                    )
-                    uu = min(max(uu, 0.0), 1.0)
-                    vv = min(max(vv, 0.0), 1.0)
-            if mapping.is_point_on_face(record, uu, vv):
-                size, rotation = _jittered_attributes(session, rng)
-                out.append((record, uu, vv, size, rotation))
-    return out
+
+
+def _has_nearby_point(cells, cell, point, spacing_squared):
+    """True when a point in this or a neighboring hash cell violates minimum spacing."""
+    cx, cy, cz = cell
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for other in cells.get((cx + dx, cy + dy, cz + dz), ()):
+                    px = point.X - other.X
+                    py = point.Y - other.Y
+                    pz = point.Z - other.Z
+                    if px * px + py * py + pz * pz < spacing_squared:
+                        return True
+    return False
 
 
 def _face_lattice(session, record, rng):

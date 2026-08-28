@@ -5,6 +5,7 @@ import Rhino
 import scriptcontext
 
 from surfacepattern.core import mapping, session
+from surfacepattern.engine import grid
 
 TARGET_DIVISIONS = 15   # grid cells along the larger face dimension
 HOLE_RATIO = 0.5        # hole diameter as a fraction of grid spacing (perf-panel look)
@@ -22,17 +23,6 @@ def spacing_for_face(record):
     return spacing
 
 
-def equal_surface_grid(record, spacing):
-    """Arc-length-spaced normalized UV points for visual Uniform Surface checks."""
-    points = []
-    rows = mapping.equal_arc_parameters(record, "v", 0.5, spacing, max_count=1000)
-    for v in rows:
-        for u in mapping.equal_arc_parameters(record, "u", v, spacing, max_count=1000):
-            if mapping.is_point_on_face(record, u, v):
-                points.append((u, v))
-    return points
-
-
 def main():
     """Pick targets and cover each face with a perf-panel style circle grid sized to the face."""
     current = session.get_session()
@@ -46,36 +36,43 @@ def main():
     undo_serial = scriptcontext.doc.BeginUndoRecord("SPDev TestMapping")
     added = 0
     fallbacks = 0
-    for record in current.targets:
-        spacing = spacing_for_face(record)
-        if spacing <= 0.0:
-            Rhino.RhinoApp.WriteLine(
-                "SPDev_TestMapping: face {} has degenerate size, skipped.".format(record.face_index)
-            )
-            continue
-        hole_diameter = spacing * HOLE_RATIO
-        points = equal_surface_grid(record, spacing)
-        for u, v in points:
-            curve, pulled = mapping.place_unit_curve(record, u, v, unit_circle, hole_diameter, 0.0)
+    spacing = spacing_for_face(current.targets[0])
+    if spacing <= 0.0:
+        Rhino.RhinoApp.WriteLine("SPDev_TestMapping: target has degenerate size.")
+        scriptcontext.doc.EndUndoRecord(undo_serial)
+        return
+    hole_diameter = spacing * HOLE_RATIO
+    original_params = dict(current.params)
+    try:
+        current.params.update({
+            "pattern_mode": "grid",
+            "placement_mode": "surface",
+            "shape": "circle",
+            "size": hole_diameter,
+            "spacing_x": spacing - hole_diameter,
+            "jitter_position": 0.0,
+            "jitter_size": 0.0,
+            "jitter_rotation": 0.0,
+            "seed": 0,
+        })
+        placements = grid.generate(current)
+        for record, u, v, size, rotation in placements:
+            curve, pulled = mapping.place_unit_curve(record, u, v, unit_circle, size, rotation)
             if curve is None:
                 continue
             scriptcontext.doc.Objects.AddCurve(curve)
             added += 1
             if not pulled:
                 fallbacks += 1
-        Rhino.RhinoApp.WriteLine(
-            "SPDev_TestMapping: face {}: {} Uniform Surface points, "
-            "spacing {:.1f}, hole d={:.1f}".format(
-                record.face_index, len(points), spacing, hole_diameter
-            )
-        )
+    finally:
+        current.params = original_params
     scriptcontext.doc.EndUndoRecord(undo_serial)
     scriptcontext.doc.Views.Redraw()
 
     Rhino.RhinoApp.WriteLine(
-        "SPDev_TestMapping: {} faces, {} circles added, {} pullback fallbacks, "
-        "suggested mode: {}".format(
-            len(current.targets), added, fallbacks, current.params.get("placement_mode")
+        "SPDev_TestMapping: {} faces, {} isotropic circles at min spacing {:.1f}, "
+        "{} pullback fallbacks".format(
+            len(current.targets), added, spacing, fallbacks
         )
     )
 

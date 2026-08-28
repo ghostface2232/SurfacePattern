@@ -1,5 +1,5 @@
 #! python3
-# UV<->3D conversion, surface frames, distortion compensation, and curve pullback.
+# UV<->3D conversion, surface metrics, frames, distortion compensation, and curve pullback.
 
 import Rhino
 import scriptcontext
@@ -74,46 +74,47 @@ def local_scale(face_record, u, v):
     return derivatives[0].Length * span_u, derivatives[1].Length * span_v
 
 
-def equal_arc_parameters(face_record, axis, fixed_parameter, spacing, offset=0.5, max_count=1000):
-    """Normalized parameters spaced by true 3D arc length on one surface isocurve.
+class SurfaceMetricSampler:
+    """Live-face sampler for area-weighted, direction-independent placement."""
 
-    ``axis`` is the changing normalized direction ("u" or "v");
-    ``fixed_parameter`` is the normalized coordinate on the other axis. The first
-    sample is ``offset * spacing`` from the isocurve start. Trim culling remains
-    the engine's responsibility because an isocurve can cross several trim regions.
-    """
-    if spacing <= 0.0 or max_count <= 0:
-        return []
-    fixed = min(max(float(fixed_parameter), 0.0), 1.0)
-    if axis == "u":
-        _su, sv = _denormalize(face_record, 0.0, fixed)
-        curve = face_record.surface.IsoCurve(0, sv)
-    elif axis == "v":
-        su, _sv = _denormalize(face_record, fixed, 0.0)
-        curve = face_record.surface.IsoCurve(1, su)
-    else:
-        raise ValueError("axis must be 'u' or 'v'")
-    if curve is None:
-        return []
+    def __init__(self, face_record):
+        self.face_record = face_record
+        self.face = face_record.resolve_face()
+        self.surface = self.face.UnderlyingSurface() if self.face is not None else None
 
-    length = curve.GetLength()
-    if length <= 1e-9:
-        return []
-    domain = curve.Domain
-    domain_length = domain.T1 - domain.T0
-    if abs(domain_length) <= 1e-12:
-        return []
+    def sample(self, u, v):
+        """Return (3D point, normalized-UV area scale) or None outside the trimmed face."""
+        if self.face is None or self.surface is None:
+            return None
+        su, sv = _denormalize(self.face_record, u, v)
+        if self.face.IsPointOnFace(su, sv) == Rhino.Geometry.PointFaceRelation.Exterior:
+            return None
+        ok, point, derivatives = self.surface.Evaluate(su, sv, 1)
+        if not ok or derivatives is None or len(derivatives) < 2:
+            return None
+        cross = Rhino.Geometry.Vector3d.CrossProduct(derivatives[0], derivatives[1])
+        span_u = abs(self.face_record.domain_u[1] - self.face_record.domain_u[0])
+        span_v = abs(self.face_record.domain_v[1] - self.face_record.domain_v[0])
+        area_scale = cross.Length * span_u * span_v
+        if area_scale <= 1e-12:
+            return None
+        return point, area_scale
 
-    parameters = []
-    distance = max(float(offset), 0.0) * spacing
-    while distance < length and len(parameters) < max_count:
-        ok, curve_parameter = curve.LengthParameter(distance)
-        if not ok:
-            break
-        normalized = (curve_parameter - domain.T0) / domain_length
-        parameters.append(min(max(normalized, 0.0), 1.0))
-        distance += spacing
-    return parameters
+    def estimate_area(self, divisions=12):
+        """Return (trimmed area estimate, maximum sampled normalized-UV area scale)."""
+        divisions = max(int(divisions), 2)
+        area_sum = 0.0
+        max_scale = 0.0
+        for i in range(divisions):
+            u = (i + 0.5) / divisions
+            for j in range(divisions):
+                sample = self.sample(u, (j + 0.5) / divisions)
+                if sample is None:
+                    continue
+                _point, area_scale = sample
+                area_sum += area_scale
+                max_scale = max(max_scale, area_scale)
+        return area_sum / (divisions * divisions), max_scale
 
 
 def _resolve_with_bbox(face_records):

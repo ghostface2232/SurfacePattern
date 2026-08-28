@@ -166,6 +166,14 @@ class LabeledSlider:
         self.textbox.Text = self._format(self.value)
         self._updating = False
 
+    def set_enabled(self, enabled):
+        """Enable or disable the complete labeled-slider row."""
+        enabled = bool(enabled)
+        self.label.Enabled = enabled
+        self.slider.Enabled = enabled
+        self.textbox.Enabled = enabled
+        self.unit_label.Enabled = enabled
+
     def row(self):
         field = Eto.Forms.StackLayout()
         field.Orientation = Eto.Forms.Orientation.Horizontal
@@ -262,6 +270,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
         self._commit_timer.Elapsed += eto_handler(self._commit_tick)
 
         self.Content = self._build_layout(session)
+        self._update_placement_controls(session.params.get("placement_mode", "uv"))
         self._apply_mode_visibility(session.params.get("pattern_mode", "grid"))
         self.Size = Eto.Drawing.Size(PANEL_WIDTH, PANEL_HEIGHT)
         self.Shown += eto_handler(self._on_shown)
@@ -290,6 +299,9 @@ class SurfacePatternPanel(Eto.Forms.Form):
         )
         body.AddRow(self._hstack(self.pick_button, self.target_label))
         body.AddRow(self._hstack(make_label("Placement"), self.placement_dropdown))
+        self.placement_hint = make_label("")
+        self.placement_hint.TextColor = Eto.Drawing.Colors.Gray
+        body.AddRow(self.placement_hint)
 
         # (2) Pattern-mode segment: grid / halftone / stamp.
         self.mode_segment = Eto.Forms.RadioButtonList()
@@ -597,6 +609,8 @@ class SurfacePatternPanel(Eto.Forms.Form):
         if key == "seed":
             value = int(value)
         session.params[key] = value
+        if key == "placement_mode":
+            self._update_placement_controls(value)
         if not session.targets:
             return
         if commit:
@@ -643,6 +657,17 @@ class SurfacePatternPanel(Eto.Forms.Form):
         )
         for name, section in self.mode_sections.items():
             section.Visible = name == mode
+
+    def _update_placement_controls(self, placement_mode):
+        """Reflect which lattice controls apply to the selected placement mode."""
+        is_uv = placement_mode == "uv"
+        self.grid_type_dropdown.Enabled = is_uv
+        self.sliders["spacing_y"].set_enabled(is_uv)
+        self.sliders["jitter_position"].set_enabled(is_uv)
+        self.sliders["spacing_x"].label.Text = "Gap X" if is_uv else "Gap"
+        self.placement_hint.Text = (
+            "" if is_uv else "Uniform: adaptive rows, one isotropic Gap"
+        )
 
     def _preview_toggled(self, _sender, _event):
         get_session().set_preview_enabled(bool(self.preview_checkbox.Checked))
@@ -820,6 +845,7 @@ class SurfacePatternPanel(Eto.Forms.Form):
             self._select_option(
                 self.placement_dropdown, PLACEMENT_OPTIONS, session.params.get("placement_mode")
             )
+            self._update_placement_controls(session.params.get("placement_mode", "uv"))
             self._select_option(self.shape_dropdown, SHAPE_OPTIONS, session.params.get("shape"))
             self._select_option(
                 self.grid_type_dropdown, GRID_TYPE_OPTIONS, session.params.get("grid_type")
